@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0F1115">
+<title>Promin</title>
+<link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0F1115;
+    --panel: #1A1D24;
+    --line: #2A2E37;
+    --text: #F2F0EA;
+    --muted: #9AA0AA;
+    --accent: #FFC53D;
+    --on-accent: #0F1115;
+    --danger: #FF6B5E;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  html { color-scheme: dark; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 400 16px/1.4 Manrope, system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  main {
+    max-width: 560px;
+    margin: 0 auto;
+    padding: 16px 16px calc(32px + env(safe-area-inset-bottom));
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 48px;
+    margin-bottom: 16px;
+  }
+  header img { width: 28px; height: 28px; }
+  header h1 { margin: 0; font-size: 22px; font-weight: 700; flex: 1; }
+  .projector {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--line); }
+
+  button {
+    font: inherit;
+    font-weight: 600;
+    min-height: 48px;
+    border-radius: var(--radius);
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background-color 150ms, border-color 150ms, opacity 150ms;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .primary { background: var(--accent); color: var(--on-accent); }
+  .outline { background: transparent; color: var(--text); border-color: var(--line); }
+  .outline:hover:not(:disabled) { border-color: var(--muted); }
+
+  #upload-btn { width: 100%; }
+  #progress { margin-top: 16px; }
+  #progress[hidden] { display: none; }
+  .progress-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    font-size: 14px;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+  .progress-row span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .track { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+  .bar { height: 100%; width: 0; background: var(--accent); transition: width 150ms; }
+  #message { margin: 16px 0 0; color: var(--danger); font-size: 14px; }
+  #message:empty { display: none; }
+  #disk { margin: 16px 0 24px; color: var(--muted); font-size: 14px; }
+
+  #list { display: grid; gap: 16px; }
+  .empty {
+    padding: 32px 16px;
+    text-align: center;
+    color: var(--muted);
+    border: 1px dashed var(--line);
+    border-radius: var(--radius);
+  }
+  .card { background: var(--panel); border-radius: var(--radius); overflow: hidden; }
+  .thumb {
+    aspect-ratio: 16 / 9;
+    background: #000;
+    display: grid;
+    place-items: center;
+  }
+  .thumb img { width: 48px; height: 48px; opacity: 0.25; }
+  .body { padding: 16px; }
+  .title-row { display: flex; align-items: flex-start; gap: 8px; }
+  .name { flex: 1; font-weight: 600; overflow-wrap: anywhere; }
+  .meta { margin: 8px 0 16px; color: var(--muted); font-size: 14px; }
+  .actions { display: flex; gap: 8px; }
+  .actions button { flex: 1; }
+
+  details.menu { position: relative; }
+  details.menu summary {
+    list-style: none;
+    width: 48px;
+    height: 48px;
+    margin: -12px -12px -12px 0;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    color: var(--muted);
+    font-size: 22px;
+    cursor: pointer;
+  }
+  details.menu summary::-webkit-details-marker { display: none; }
+  details.menu .pop {
+    position: absolute;
+    right: -4px;
+    top: 40px;
+    z-index: 2;
+    min-width: 176px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 8px;
+  }
+  details.menu .pop button {
+    width: 100%;
+    background: transparent;
+    color: var(--danger);
+    text-align: left;
+    padding: 0 12px;
+  }
+
+  #player {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    background: #000;
+    display: flex;
+    flex-direction: column;
+  }
+  #player[hidden] { display: none; }
+  #player video { flex: 1; min-height: 0; width: 100%; background: #000; }
+  #player .bar-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 8px 8px 16px;
+    padding-top: calc(8px + env(safe-area-inset-top));
+  }
+  #player-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  #player-close { padding: 0 16px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="/static/logo.svg" alt="">
+    <h1>Promin</h1>
+    <div class="projector" title="Керування проектором з'явиться пізніше">
+      <span class="dot"></span><span>Проектор не на зв'язку</span>
+    </div>
+  </header>
+
+  <input id="file" type="file" accept="video/*" hidden>
+  <button id="upload-btn" class="primary" type="button">Завантажити відео</button>
+  <div id="progress" hidden>
+    <div class="progress-row"><span id="progress-name"></span><span id="progress-pct">0%</span></div>
+    <div class="track"><div class="bar" id="progress-bar"></div></div>
+  </div>
+  <p id="message" role="alert"></p>
+  <p id="disk"></p>
+
+  <section id="list" aria-live="polite"></section>
+</main>
+
+<div id="player" hidden>
+  <div class="bar-top">
+    <span id="player-title"></span>
+    <button id="player-close" class="outline" type="button">Закрити</button>
+  </div>
+  <video id="video" controls playsinline></video>
+</div>
+
+<script>
+(function () {
+  var fileInput = document.getElementById('file');
+  var uploadBtn = document.getElementById('upload-btn');
+  var progress = document.getElementById('progress');
+  var progressName = document.getElementById('progress-name');
+  var progressPct = document.getElementById('progress-pct');
+  var progressBar = document.getElementById('progress-bar');
+  var message = document.getElementById('message');
+  var disk = document.getElementById('disk');
+  var list = document.getElementById('list');
+  var player = document.getElementById('player');
+  var video = document.getElementById('video');
+  var playerTitle = document.getElementById('player-title');
+  var maxUpload = Infinity;
+
+  function formatSize(bytes) {
+    var mb = bytes / 1048576;
+    if (mb >= 1024) return (mb / 1024).toFixed(1).replace('.', ',') + ' ГБ';
+    if (mb >= 10) return Math.round(mb) + ' МБ';
+    return mb.toFixed(1).replace('.', ',') + ' МБ';
+  }
+
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function errorText(xhrOrResponseBody, fallback) {
+    try {
+      var data = JSON.parse(xhrOrResponseBody);
+      if (data && typeof data.detail === 'string') return data.detail;
+    } catch (e) {}
+    return fallback;
+  }
+
+  function renderCard(item) {
+    var card = el('article', 'card');
+
+    var thumb = el('div', 'thumb');
+    var mark = el('img');
+    mark.src = '/static/logo.svg';
+    mark.alt = '';
+    thumb.appendChild(mark);
+    card.appendChild(thumb);
+
+    var body = el('div', 'body');
+    var titleRow = el('div', 'title-row');
+    titleRow.appendChild(el('div', 'name', item.name));
+
+    var menu = el('details', 'menu');
+    var summary = el('summary', null, '⋯');
+    summary.setAttribute('aria-label', 'Меню відео');
+    menu.appendChild(summary);
+    var pop = el('div', 'pop');
+    var del = el('button', null, 'Видалити');
+    del.type = 'button';
+    del.addEventListener('click', function () {
+      menu.open = false;
+      if (confirm('Видалити «' + item.name + '»? Відновити його не вдасться.')) remove(item.id);
+    });
+    pop.appendChild(del);
+    menu.appendChild(pop);
+    titleRow.appendChild(menu);
+    body.appendChild(titleRow);
+
+    body.appendChild(el('div', 'meta', formatSize(item.size) + ' · готове'));
+
+    var actions = el('div', 'actions');
+    var watch = el('button', 'outline', 'Дивитись тут');
+    watch.type = 'button';
+    watch.addEventListener('click', function () { openPlayer(item); });
+    actions.appendChild(watch);
+    body.appendChild(actions);
+
+    card.appendChild(body);
+    return card;
+  }
+
+  function refresh() {
+    return fetch('/api/videos')
+      .then(function (r) {
+        if (!r.ok) throw new Error('status ' + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        maxUpload = data.max_upload;
+        disk.textContent = 'Вільно на сервері: ' + formatSize(data.disk.free);
+        list.textContent = '';
+        if (!data.videos.length) {
+          list.appendChild(el('div', 'empty', 'Тут з’являться ваші відео'));
+          return;
+        }
+        data.videos.forEach(function (item) { list.appendChild(renderCard(item)); });
+      })
+      .catch(function () {
+        message.textContent = 'Не вдалося отримати список відео. Перевірте з’єднання із сервером.';
+      });
+  }
+
+  function upload(file) {
+    message.textContent = '';
+    if (file.size > maxUpload) {
+      message.textContent = 'Файл завеликий: ' + formatSize(file.size) + ', дозволено до ' + formatSize(maxUpload) + '.';
+      return;
+    }
+    uploadBtn.disabled = true;
+    progress.hidden = false;
+    progressName.textContent = file.name;
+    progressPct.textContent = '0%';
+    progressBar.style.width = '0';
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/videos');
+    xhr.setRequestHeader('X-Filename', encodeURIComponent(file.name));
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    xhr.upload.onprogress = function (e) {
+      if (!e.lengthComputable) return;
+      var pct = Math.floor(e.loaded / e.total * 100);
+      progressPct.textContent = pct + '%';
+      progressBar.style.width = pct + '%';
+    };
+    function done() {
+      uploadBtn.disabled = false;
+      progress.hidden = true;
+      fileInput.value = '';
+    }
+    xhr.onload = function () {
+      done();
+      if (xhr.status === 201) {
+        refresh();
+      } else {
+        message.textContent = errorText(xhr.responseText, 'Не вдалося завантажити відео (помилка ' + xhr.status + ').');
+      }
+    };
+    xhr.onerror = function () {
+      done();
+      message.textContent = 'Завантаження обірвалося. Перевірте з’єднання і спробуйте ще раз.';
+    };
+    xhr.send(file);
+  }
+
+  function remove(id) {
+    message.textContent = '';
+    fetch('/api/videos/' + id, { method: 'DELETE' })
+      .then(function (r) {
+        if (!r.ok && r.status !== 404) throw new Error('status ' + r.status);
+        return refresh();
+      })
+      .catch(function () {
+        message.textContent = 'Не вдалося видалити відео. Спробуйте ще раз.';
+      });
+  }
+
+  function openPlayer(item) {
+    playerTitle.textContent = item.name;
+    video.src = '/media/' + item.id;
+    player.hidden = false;
+    var started = video.play();
+    if (started && started.catch) started.catch(function () {});
+  }
+
+  function closePlayer() {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    player.hidden = true;
+  }
+
+  uploadBtn.addEventListener('click', function () { fileInput.click(); });
+  fileInput.addEventListener('change', function () {
+    if (fileInput.files.length) upload(fileInput.files[0]);
+  });
+  document.getElementById('player-close').addEventListener('click', closePlayer);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !player.hidden) closePlayer();
+  });
+  document.addEventListener('click', function (e) {
+    var menus = document.querySelectorAll('details.menu[open]');
+    for (var i = 0; i < menus.length; i++) {
+      if (!menus[i].contains(e.target)) menus[i].open = false;
+    }
+  });
+
+  refresh();
+})();
+</script>
+</body>
+</html>
