@@ -161,6 +161,21 @@
     padding: 0 12px;
   }
 
+  footer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 16px;
+    margin-top: 32px;
+    color: var(--muted);
+    font-size: 14px;
+  }
+  footer .who { flex: 1; min-width: 160px; }
+  footer a { color: var(--text); }
+  footer form { margin: 0; }
+  footer button { min-height: 48px; padding: 0 16px; }
+  [hidden] { display: none !important; }
+
   #player {
     position: fixed;
     inset: 0;
@@ -193,15 +208,21 @@
   </header>
 
   <input id="file" type="file" accept="video/*" hidden>
-  <button id="upload-btn" class="primary" type="button">Завантажити відео</button>
+  <button id="upload-btn" class="primary" type="button" hidden>Завантажити відео</button>
   <div id="progress" hidden>
     <div class="progress-row"><span id="progress-name"></span><span id="progress-pct">0%</span></div>
     <div class="track"><div class="bar" id="progress-bar"></div></div>
   </div>
   <p id="message" role="alert"></p>
-  <p id="disk"></p>
+  <p id="disk" hidden></p>
 
   <section id="list" aria-live="polite"></section>
+
+  <footer>
+    <span class="who" id="who"></span>
+    <a id="users-link" href="/users" hidden>Користувачі</a>
+    <form method="post" action="/logout"><button class="outline" type="submit">Вийти</button></form>
+  </footer>
 </main>
 
 <div id="player" hidden>
@@ -227,6 +248,7 @@
   var video = document.getElementById('video');
   var playerTitle = document.getElementById('player-title');
   var maxUpload = Infinity;
+  var isAdmin = false;
 
   function formatSize(bytes) {
     if (bytes < 1048576) return Math.max(1, Math.round(bytes / 1024)) + ' КБ';
@@ -289,20 +311,22 @@
     var titleRow = el('div', 'title-row');
     titleRow.appendChild(el('div', 'name', item.name));
 
-    var menu = el('details', 'menu');
-    var summary = el('summary', null, '⋯');
-    summary.setAttribute('aria-label', 'Меню відео');
-    menu.appendChild(summary);
-    var pop = el('div', 'pop');
-    var del = el('button', null, 'Видалити');
-    del.type = 'button';
-    del.addEventListener('click', function () {
-      menu.open = false;
-      if (confirm('Видалити «' + item.name + '»? Відновити його не вдасться.')) remove(item.id);
-    });
-    pop.appendChild(del);
-    menu.appendChild(pop);
-    titleRow.appendChild(menu);
+    if (isAdmin) {
+      var menu = el('details', 'menu');
+      var summary = el('summary', null, '⋯');
+      summary.setAttribute('aria-label', 'Меню відео');
+      menu.appendChild(summary);
+      var pop = el('div', 'pop');
+      var del = el('button', null, 'Видалити');
+      del.type = 'button';
+      del.addEventListener('click', function () {
+        menu.open = false;
+        if (confirm('Видалити «' + item.name + '»? Відновити його не вдасться.')) remove(item.id);
+      });
+      pop.appendChild(del);
+      menu.appendChild(pop);
+      titleRow.appendChild(menu);
+    }
     body.appendChild(titleRow);
 
     body.appendChild(el('div', 'meta', formatSize(item.size) + ' · ' + statusText(item)));
@@ -319,7 +343,9 @@
     }
 
     var actions = el('div', 'actions');
-    if (item.status === 'error') {
+    if (item.status === 'error' && !isAdmin) {
+      // Глядачу нічого запропонувати: повторити обробку може лише адміністратор.
+    } else if (item.status === 'error') {
       var again = el('button', 'outline', 'Повторити');
       again.type = 'button';
       again.addEventListener('click', function () { retry(item.id); });
@@ -478,7 +504,20 @@
     }
   });
 
-  refresh();
+  fetch('/api/me')
+    .then(function (r) {
+      if (r.status === 401) { location.href = '/login'; throw new Error('login'); }
+      return r.json();
+    })
+    .then(function (me) {
+      isAdmin = me.role === 'admin';
+      document.getElementById('who').textContent = 'Ви увійшли як ' + me.username;
+      uploadBtn.hidden = !isAdmin;
+      disk.hidden = !isAdmin;
+      document.getElementById('users-link').hidden = !isAdmin;
+      return refresh();
+    })
+    .catch(function () {});
 })();
 </script>
 </body>

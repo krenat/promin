@@ -1,16 +1,19 @@
 """Promin — домашній відеосервер для проектора.
 
-Список відео, завантаження, перекодування, перегляд, видалення і вхід за токеном.
+Список відео, завантаження, перекодування, перегляд, видалення, користувачі з ролями.
 Пульт для проектора (етап 4) ще не доданий.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import html
 import json
 import logging
 import os
+import re
+import secrets
 import shutil
 import subprocess
 import threading
@@ -26,6 +29,7 @@ import anyio
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from starlette.requests import ClientDisconnect
 
 log = logging.getLogger("promin")
@@ -39,6 +43,13 @@ PUBLIC_KEYS = ("id", "name", "size", "status", "created", "duration", "thumb", "
 COOKIE_NAME = "promin_session"
 COOKIE_MAX_AGE = 365 * 24 * 3600
 MIN_TOKEN_LENGTH = 12
+
+# Вбудований адміністратор: його пароль — це PROMIN_TOKEN, у файлі він не зберігається.
+ADMIN = "admin"
+ROLES = ("admin", "viewer")
+USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,31}$")
+MIN_PASSWORD_LENGTH = 8
+PBKDF2_ROUNDS = 200_000
 LOGIN_MAX_FAILURES = 5
 LOGIN_WINDOW_SECONDS = 15 * 60
 
@@ -505,6 +516,84 @@ def same(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
+def hash_password(password: str, salt: bytes) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ROUNDS).hex()
+
+
+class UserStore:
+    """Користувачі у JSON-файлі; паролі лише у вигляді хешів."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._users: Dict[str, Dict[str, Any]] = {}
+
+    def load(self) -> None:
+        with self._lock:
+            if self.path.exists():
+                self._users = json.loads(self.path.read_text(encoding="utf-8"))
+            else:
+                self._users = {}
+
+    def _save(self) -> None:
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps(self._users, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.path)
+
+    def list(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return [
+                {"username": name, "role": user["role"], "created": user["created"]}
+                for name, user in sorted(self._users.items())
+            ]
+
+    def get(self, username: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            user = self._users.get(username)
+            return dict(user) if user else None
+
+    def add(self, username: str, password: str, role: str) -> bool:
+        salt = secrets.token_bytes(16)
+        digest = hash_password(password, salt)
+        with self._lock:
+            if username in self._users:
+                return False
+            self._users[username] = {
+                "role": role, "salt": salt.hex(), "hash": digest, "created": time.time(),
+            }
+            self._save()
+            return True
+
+    def set_password(self, username: str, password: str) -> bool:
+        salt = secrets.token_bytes(16)
+        digest = hash_password(password, salt)
+        with self._lock:
+            if username not in self._users:
+                return False
+            self._users[username].update(salt=salt.hex(), hash=digest)
+            self._save()
+            return True
+
+    def remove(self, username: str) -> bool:
+        with self._lock:
+            if username not in self._users:
+                return False
+            del self._users[username]
+            self._save()
+            return True
+
+
+class NewUser(BaseModel):
+    username: str
+    password: str
+    role: str = "viewer"
+
+
+class NewPassword(BaseModel):
+    password: str
+
+
 # ------------------------------------------------------------------- застосунок
 
 
@@ -526,10 +615,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         raise RuntimeError(
             "Задайте PROMIN_TOKEN: щонайменше %d символів" % MIN_TOKEN_LENGTH
         )
-    # У cookie лежить не сам токен, а похідне від нього значення.
-    session_value = hmac.new(
-        settings.token.encode("utf-8"), b"promin-session", "sha256"
-    ).hexdigest()
+    # Ключ для підпису cookie; сам токен у cookie не потрапляє.
+    secret = hmac.new(settings.token.encode("utf-8"), b"promin-session", "sha256").digest()
+    users = UserStore(settings.data_dir / "users.json")
     limiter = LoginLimiter()
     store = Store(settings.data_dir / "videos.json")
     transcoder = Transcoder(settings, store)
@@ -544,6 +632,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         ):
             leftover.unlink(missing_ok=True)
         store.load()
+        users.load()
         await transcoder.start()
         yield
         await transcoder.stop()
@@ -552,14 +641,50 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.state.settings = settings
     app.state.store = store
     app.state.transcoder = transcoder
+    app.state.users = users
     app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
-    def is_authenticated(request: Request) -> bool:
-        return same(request.cookies.get(COOKIE_NAME, ""), session_value)
+    def fingerprint(username: str) -> Optional[str]:
+        """Те, від чого залежить сесія: зміна пароля чи видалення її скасовує."""
+        if username == ADMIN:
+            return "admin:" + settings.token
+        user = users.get(username)
+        return user["hash"] if user else None
 
-    def require_auth(request: Request) -> None:
-        if not is_authenticated(request):
+    def session_cookie(username: str) -> str:
+        message = (username + "|" + (fingerprint(username) or "")).encode("utf-8")
+        return username + "." + hmac.new(secret, message, "sha256").hexdigest()
+
+    def current_user(request: Request) -> Optional[Dict[str, Any]]:
+        raw = request.cookies.get(COOKIE_NAME, "")
+        username = raw.partition(".")[0]
+        if not username or fingerprint(username) is None:
+            return None
+        if not same(raw, session_cookie(username)):
+            return None
+        role = "admin" if username == ADMIN else (users.get(username) or {}).get("role")
+        return {"username": username, "role": role}
+
+    def require_auth(request: Request) -> Dict[str, Any]:
+        user = current_user(request)
+        if user is None:
             raise NotAuthenticated()
+        return user
+
+    def require_admin(request: Request) -> Dict[str, Any]:
+        user = require_auth(request)
+        if user["role"] != "admin":
+            raise HTTPException(403, "Це може робити лише адміністратор")
+        return user
+
+    async def check_password(username: str, password: str) -> bool:
+        if username == ADMIN:
+            return same(password, settings.token)
+        user = users.get(username)
+        # Для невідомого імені теж рахуємо хеш, щоб відповідь не видавала, чи воно існує.
+        salt = bytes.fromhex(user["salt"]) if user else b"\0" * 16
+        digest = await asyncio.to_thread(hash_password, password, salt)
+        return user is not None and same(digest, user["hash"])
 
     @app.exception_handler(NotAuthenticated)
     async def not_authenticated(request: Request, exc: NotAuthenticated) -> Response:
@@ -573,7 +698,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     @app.get("/login")
     async def login_form(request: Request) -> Response:
-        if is_authenticated(request):
+        if current_user(request):
             return RedirectResponse("/", status_code=303)
         return login_page()
 
@@ -583,21 +708,86 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if limiter.blocked(ip):
             return login_page("Забагато спроб. Спробуйте знову за 15 хвилин.", 429)
         if int(request.headers.get("content-length") or 0) > 4096:
-            return login_page("Токен задовгий.", 413)
+            return login_page("Забагато даних.", 413)
         form = parse_qs((await request.body()).decode("utf-8", errors="replace"))
-        token = (form.get("token") or [""])[0].strip()
-        if not same(token, settings.token):
+        username = (form.get("username") or [""])[0].strip().lower()
+        password = (form.get("password") or [""])[0]
+        if not await check_password(username, password):
             limiter.fail(ip)
-            return login_page("Неправильний токен.", 401)
+            return login_page("Неправильний логін або пароль.", 401)
         limiter.reset(ip)
         response = RedirectResponse("/", status_code=303)
         response.set_cookie(
-            COOKIE_NAME, session_value, max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax"
+            COOKIE_NAME, session_cookie(username),
+            max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax",
         )
         return response
 
-    # Усе нижче доступне лише після входу, включно з відеофайлами.
+    @app.post("/logout")
+    async def logout() -> Response:
+        response = RedirectResponse("/login", status_code=303)
+        response.delete_cookie(COOKIE_NAME)
+        return response
+
+    # router — усім, хто увійшов (включно з відеофайлами); admin — лише адміністраторам.
     router = APIRouter(dependencies=[Depends(require_auth)])
+    admin = APIRouter(dependencies=[Depends(require_admin)])
+
+    @router.get("/api/me")
+    async def me(request: Request) -> Dict[str, Any]:
+        return require_auth(request)
+
+    @router.get("/users", response_class=HTMLResponse)
+    async def users_page(request: Request) -> Response:
+        if require_auth(request)["role"] != "admin":
+            return RedirectResponse("/", status_code=303)
+        return HTMLResponse((BASE_DIR / "templates" / "users.html").read_text(encoding="utf-8"))
+
+    @admin.get("/api/users")
+    async def list_users() -> Dict[str, Any]:
+        builtin = {"username": ADMIN, "role": "admin", "created": None, "builtin": True}
+        return {"users": [builtin] + users.list()}
+
+    def check_new_password(password: str) -> None:
+        if len(password) < MIN_PASSWORD_LENGTH:
+            raise HTTPException(400, "Пароль має містити щонайменше %d символів" % MIN_PASSWORD_LENGTH)
+        if len(password) > 200:
+            raise HTTPException(400, "Пароль задовгий")
+
+    @admin.post("/api/users", status_code=201)
+    async def create_user(body: NewUser) -> Dict[str, Any]:
+        username = body.username.strip().lower()
+        if not USERNAME_RE.match(username):
+            raise HTTPException(
+                400, "Логін: від 2 до 32 символів, лише малі латинські літери, цифри, «-» та «_»"
+            )
+        if body.role not in ROLES:
+            raise HTTPException(400, "Невідома роль")
+        check_new_password(body.password)
+        if username == ADMIN or not await asyncio.to_thread(
+            users.add, username, body.password, body.role
+        ):
+            raise HTTPException(409, "Такий користувач уже є")
+        return {"username": username, "role": body.role}
+
+    @admin.post("/api/users/{username}/password", status_code=204)
+    async def change_password(username: str, body: NewPassword) -> Response:
+        if username == ADMIN:
+            raise HTTPException(400, "Пароль вбудованого адміністратора задається в PROMIN_TOKEN")
+        check_new_password(body.password)
+        if not await asyncio.to_thread(users.set_password, username, body.password):
+            raise HTTPException(404, "Користувача не знайдено")
+        return Response(status_code=204)
+
+    @admin.delete("/api/users/{username}", status_code=204)
+    async def delete_user(username: str, request: Request) -> Response:
+        if username == ADMIN:
+            raise HTTPException(400, "Вбудованого адміністратора видалити не можна")
+        if username == require_auth(request)["username"]:
+            raise HTTPException(400, "Не можна видалити себе")
+        if not users.remove(username):
+            raise HTTPException(404, "Користувача не знайдено")
+        return Response(status_code=204)
 
     def public(item: Dict[str, Any]) -> Dict[str, Any]:
         data = {key: item.get(key) for key in PUBLIC_KEYS}
@@ -618,7 +808,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             "max_upload": settings.max_upload_bytes,
         }
 
-    @router.post("/api/videos", status_code=201)
+    @admin.post("/api/videos", status_code=201)
     async def upload_video(request: Request) -> Dict[str, Any]:
         name = clean_name(request.headers.get("x-filename", ""))
         ext = Path(name).suffix.lower()
@@ -675,7 +865,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         transcoder.enqueue(video_id)
         return public(item)
 
-    @router.post("/api/videos/{video_id}/retry")
+    @admin.post("/api/videos/{video_id}/retry")
     async def retry_video(video_id: str) -> Dict[str, Any]:
         item = store.get(video_id)
         if not item:
@@ -707,7 +897,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             path, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"}
         )
 
-    @router.delete("/api/videos/{video_id}", status_code=204)
+    @admin.delete("/api/videos/{video_id}", status_code=204)
     async def delete_video(video_id: str) -> Response:
         if not store.remove(video_id):
             raise HTTPException(404, "Відео не знайдено")
@@ -716,6 +906,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         return Response(status_code=204)
 
     app.include_router(router)
+    app.include_router(admin)
     return app
 
 

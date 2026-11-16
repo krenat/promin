@@ -27,7 +27,7 @@
   .brand { display: flex; align-items: center; gap: 8px; margin-bottom: 32px; }
   .brand img { width: 28px; height: 28px; }
   .brand h1 { margin: 0; font-size: 22px; font-weight: 700; }
-  label { display: block; margin-bottom: 8px; color: #9AA0AA; font-size: 14px; }
+  label { display: block; margin: 16px 0 8px; color: #9AA0AA; font-size: 14px; }
   input {
     width: 100%;
     height: 56px;
@@ -43,7 +43,7 @@
   button {
     width: 100%;
     height: 56px;
-    margin-top: 16px;
+    margin-top: 24px;
     font: inherit;
     font-weight: 600;
     font-size: 18px;
@@ -63,9 +63,12 @@
     <img src="/static/logo.svg" alt="">
     <h1>Promin</h1>
   </div>
-  <label for="token">Токен доступу</label>
-  <input id="token" name="token" type="password" autocomplete="current-password"
+  <label for="username">Логін</label>
+  <input id="username" name="username" type="text" autocomplete="username"
          autocapitalize="none" autocorrect="off" spellcheck="false" required autofocus>
+  <label for="password">Пароль</label>
+  <input id="password" name="password" type="password" autocomplete="current-password"
+         autocapitalize="none" autocorrect="off" spellcheck="false" required>
   <button type="submit">Увійти</button>
   <p class="error" role="alert">{{error}}</p>
 </form>

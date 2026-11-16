@@ -57,10 +57,14 @@ def make_client(tmp_path: Path, login: bool = True, **overrides) -> TestClient:
     if login:
         # Cookie, яку сервер видає після входу, однакова для того самого токена.
         with TestClient(create_app(settings), follow_redirects=False) as tmp:
-            r = tmp.post("/login", data={"token": TOKEN})
+            r = sign_in(tmp)
             assert r.status_code == 303
             client.cookies.set("promin_session", r.cookies["promin_session"])
     return client
+
+
+def sign_in(client: TestClient, username: str = "admin", password: str = TOKEN):
+    return client.post("/login", data={"username": username, "password": password})
 
 
 @pytest.fixture
@@ -350,12 +354,13 @@ def test_api_requires_login(anon, tmp_path):
 def test_login_page_and_logo_are_public(anon):
     r = anon.get("/login")
     assert r.status_code == 200
-    assert 'name="token"' in r.text
+    assert 'name="username"' in r.text
+    assert 'name="password"' in r.text
     assert anon.get("/static/logo.svg").status_code == 200
 
 
 def test_login_sets_long_lived_http_only_cookie(anon):
-    r = anon.post("/login", data={"token": TOKEN})
+    r = sign_in(anon)
     assert r.status_code == 303
     assert r.headers["location"] == "/"
     cookie = r.headers["set-cookie"].lower()
@@ -368,21 +373,166 @@ def test_login_sets_long_lived_http_only_cookie(anon):
 
 
 def test_wrong_token_is_rejected(anon):
-    r = anon.post("/login", data={"token": "wrong-token-000000000"})
+    r = sign_in(anon, password="wrong-token-000000000")
     assert r.status_code == 401
-    assert "Неправильний токен" in r.text
+    assert "Неправильний логін або пароль" in r.text
     assert "set-cookie" not in r.headers
     assert anon.get("/api/videos").status_code == 401
 
 
 def test_forged_cookie_is_rejected(anon):
-    anon.cookies.set("promin_session", "0" * 64)
+    anon.cookies.set("promin_session", "admin." + "0" * 64)
     assert anon.get("/api/videos").status_code == 401
 
 
 def test_login_attempts_are_limited(anon):
     for _ in range(5):
-        assert anon.post("/login", data={"token": "wrong"}).status_code == 401
-    # Після п'яти невдач не пускає навіть правильний токен.
-    assert anon.post("/login", data={"token": TOKEN}).status_code == 429
+        assert sign_in(anon, password="wrong").status_code == 401
+    # Після п'яти невдач не пускає навіть правильний пароль.
+    assert sign_in(anon).status_code == 429
     assert anon.get("/api/videos").status_code == 401
+
+
+# ---------------------------------------------------------- користувачі й ролі
+
+VIEWER_PASSWORD = "viewer-pass-1"
+
+
+def add_user(client: TestClient, username: str = "olena", password: str = VIEWER_PASSWORD, role: str = "viewer"):
+    return client.post("/api/users", json={"username": username, "password": password, "role": role})
+
+
+@pytest.fixture
+def viewer(client, tmp_path):
+    """Клієнт, що увійшов як глядач; `client` поруч лишається адміністратором."""
+    assert add_user(client).status_code == 201
+    c = TestClient(client.app, follow_redirects=False)
+    assert sign_in(c, "olena", VIEWER_PASSWORD).status_code == 303
+    return c
+
+
+def test_me_reports_role(client, viewer):
+    assert client.get("/api/me").json() == {"username": "admin", "role": "admin"}
+    assert viewer.get("/api/me").json() == {"username": "olena", "role": "viewer"}
+
+
+def test_admin_manages_users(client, tmp_path):
+    assert add_user(client).status_code == 201
+    names = [u["username"] for u in client.get("/api/users").json()["users"]]
+    assert names == ["admin", "olena"]
+    # Пароль у файлі не лежить відкритим текстом.
+    assert VIEWER_PASSWORD not in (tmp_path / "users.json").read_text(encoding="utf-8")
+
+    assert client.delete("/api/users/olena").status_code == 204
+    assert client.delete("/api/users/olena").status_code == 404
+    assert [u["username"] for u in client.get("/api/users").json()["users"]] == ["admin"]
+
+
+@pytest.mark.parametrize(
+    "payload, status",
+    [
+        ({"username": "admin", "password": "long-enough-1"}, 409),
+        ({"username": "A b", "password": "long-enough-1"}, 400),
+        ({"username": "x", "password": "long-enough-1"}, 400),
+        ({"username": "petro", "password": "short"}, 400),
+        ({"username": "petro", "password": "long-enough-1", "role": "king"}, 400),
+    ],
+)
+def test_invalid_users_are_rejected(client, payload, status):
+    assert client.post("/api/users", json=payload).status_code == status
+
+
+def test_duplicate_user_is_rejected(client):
+    assert add_user(client).status_code == 201
+    assert add_user(client).status_code == 409
+
+
+def test_builtin_admin_is_protected(client):
+    assert client.delete("/api/users/admin").status_code == 400
+    r = client.post("/api/users/admin/password", json={"password": "another-pass-1"})
+    assert r.status_code == 400
+
+
+def test_admin_role_user_cannot_delete_self(client):
+    assert add_user(client, "ivan", "ivan-password-1", role="admin").status_code == 201
+    ivan = TestClient(client.app, follow_redirects=False)
+    assert sign_in(ivan, "ivan", "ivan-password-1").status_code == 303
+    assert ivan.get("/api/users").status_code == 200
+    assert ivan.delete("/api/users/ivan").status_code == 400
+
+
+@needs_ffmpeg
+def test_viewer_can_watch_but_not_change(client, viewer, small_clip):
+    video = wait_done(client, upload(client, small_clip).json()["id"])
+    assert video["status"] == "ready"
+
+    assert [v["id"] for v in viewer.get("/api/videos").json()["videos"]] == [video["id"]]
+    assert viewer.get("/").status_code == 200
+    assert viewer.get("/media/" + video["id"]).status_code == 200
+    assert viewer.get("/thumb/" + video["id"]).status_code == 200
+
+    assert upload(viewer, small_clip).status_code == 403
+    assert viewer.delete("/api/videos/" + video["id"]).status_code == 403
+    assert viewer.post("/api/videos/%s/retry" % video["id"]).status_code == 403
+    assert len(client.get("/api/videos").json()["videos"]) == 1
+
+
+def test_viewer_cannot_manage_users(viewer):
+    assert viewer.get("/api/users").status_code == 403
+    assert add_user(viewer, "petro").status_code == 403
+    assert viewer.delete("/api/users/olena").status_code == 403
+    r = viewer.get("/users")
+    assert r.status_code == 303 and r.headers["location"] == "/"
+
+
+def test_users_page_for_admin(client):
+    r = client.get("/users")
+    assert r.status_code == 200
+    assert "Користувачі" in r.text
+
+
+def test_deleting_user_ends_their_session(client, viewer):
+    assert viewer.get("/api/videos").status_code == 200
+    assert client.delete("/api/users/olena").status_code == 204
+    assert viewer.get("/api/videos").status_code == 401
+
+
+def test_password_change_ends_old_session(client, viewer):
+    r = client.post("/api/users/olena/password", json={"password": "brand-new-pass-2"})
+    assert r.status_code == 204
+    assert viewer.get("/api/videos").status_code == 401
+
+    fresh = TestClient(client.app, follow_redirects=False)
+    assert sign_in(fresh, "olena", VIEWER_PASSWORD).status_code == 401
+    assert sign_in(fresh, "olena", "brand-new-pass-2").status_code == 303
+    assert fresh.get("/api/videos").status_code == 200
+
+
+def test_unknown_user_and_wrong_password_look_the_same(anon):
+    a = sign_in(anon, "nobody", "whatever-123")
+    b = sign_in(anon, "admin", "whatever-123")
+    assert a.status_code == b.status_code == 401
+    assert a.text == b.text
+
+
+def test_login_is_case_insensitive_for_username(client):
+    assert add_user(client).status_code == 201
+    c = TestClient(client.app, follow_redirects=False)
+    assert sign_in(c, " Olena ", VIEWER_PASSWORD).status_code == 303
+
+
+def test_logout_clears_session(client):
+    c = TestClient(client.app, follow_redirects=False)
+    assert sign_in(c).status_code == 303
+    assert c.get("/api/me").status_code == 200
+    r = c.post("/logout")
+    assert r.status_code == 303 and r.headers["location"] == "/login"
+    assert c.get("/api/me").status_code == 401
+
+
+def test_users_survive_restart(tmp_path):
+    with make_client(tmp_path) as c:
+        assert add_user(c).status_code == 201
+    with make_client(tmp_path, login=False) as c:
+        c.follow_redirects = False
+        assert sign_in(c, "olena", VIEWER_PASSWORD).status_code == 303
