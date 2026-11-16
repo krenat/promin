@@ -137,6 +137,24 @@
   var barTimer = null;
   var pointerTimer = null;
 
+  // Повноекранний режим браузер дозволяє лише у відповідь на натискання,
+  // тому входимо в нього від кнопки «Почати» і від будь-якого наступного натискання.
+  function isFullscreen() {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement ||
+              document.mozFullScreenElement || document.msFullscreenElement);
+  }
+
+  function enterFullscreen() {
+    var root = document.documentElement;
+    var request = root.requestFullscreen || root.webkitRequestFullscreen ||
+                  root.webkitRequestFullScreen || root.mozRequestFullScreen || root.msRequestFullscreen;
+    if (!request || isFullscreen()) return;
+    try {
+      var result = request.call(root);
+      if (result && result['catch']) result['catch'](function () {});
+    } catch (e) {}
+  }
+
   function showScreen(name) {
     for (var i = 0; i < screens.length; i++) {
       var node = document.getElementById(screens[i]);
@@ -327,6 +345,7 @@
   video.addEventListener('error', function () { if (current) stop(); });
 
   document.getElementById('start-btn').addEventListener('click', function () {
+    enterFullscreen();
     started = true;
     if (current) {
       showScreen('playing');
@@ -338,8 +357,16 @@
   });
 
   document.getElementById('takeover-btn').addEventListener('click', function () {
+    enterFullscreen();
     showScreen(!started ? 'start' : current ? 'playing' : 'waiting');
     connect();
+  });
+
+  // Якщо з повноекранного режиму вийшли (наприклад, кнопкою «Назад»),
+  // будь-яке натискання чи клавіша OK на пульті повертає його.
+  document.addEventListener('click', function () { if (started) enterFullscreen(); });
+  document.addEventListener('keydown', function (event) {
+    if (started && (event.keyCode === 13 || event.keyCode === 32)) enterFullscreen();
   });
 
   // Курсор ховаємо, поки мишею не ворухнуть.
