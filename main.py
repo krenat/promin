@@ -239,16 +239,16 @@ def build_ffmpeg_args(
     if plan["mode"] == "remux":
         args += ["-c", "copy"]
     else:
-        filters = []
         tonemapped = bool(plan["hdr"] and hdr_filter)
-        if tonemapped:
-            filters.append(hdr_filter)
         # Вписати в 1920×1080 без збільшення; поворот ffmpeg застосовує сам.
-        filters.append(
+        filters = [
             "scale=w='min(%d,iw)':h='min(%d,ih)'"
             ":force_original_aspect_ratio=decrease:force_divisible_by=2"
             % (MAX_WIDTH, MAX_HEIGHT)
-        )
+        ]
+        # Tone mapping після зменшення: на 4K він утричі повільніший.
+        if tonemapped:
+            filters.append(hdr_filter)
         if plan["fps"] > MAX_FPS + 0.5:
             filters.append("fps=%d" % MAX_FPS)
         filters.append("format=yuv420p")
