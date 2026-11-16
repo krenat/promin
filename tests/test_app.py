@@ -859,3 +859,8 @@ def test_old_thumbnails_are_remade_on_start(tmp_path, small_clip):
             time.sleep(0.1)
         assert video["thumb_v"] == 2 and video["thumb"] is True
         assert c.get("/thumb/abc").content[:2] == b"\xff\xd8"
+
+
+def test_tv_page_asks_for_fullscreen_on_start(anon):
+    page = anon.get("/tv").text
+    assert "requestFullscreen" in page and "webkitRequestFullscreen" in page
