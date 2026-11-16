@@ -1,0 +1,17 @@
+services:
+  promin:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PROMIN_DATA_DIR: /data
+    ports:
+      - "${PROMIN_PORT:-8080}:${PROMIN_PORT:-8080}"
+    volumes:
+      - promin-data:/data
+    # Щоб ffmpeg не забирав процесор у сусідніх контейнерів.
+    cpus: ${PROMIN_CPUS:-2}
+    stop_grace_period: 10s
+
+volumes:
+  promin-data:
