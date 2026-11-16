@@ -51,7 +51,9 @@
     color: var(--muted);
     font-size: 14px;
   }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--line); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--line); transition: background-color 150ms; }
+  .projector.on .dot { background: var(--accent); }
+  .projector.on { color: var(--text); }
 
   button {
     font: inherit;
@@ -176,6 +178,53 @@
   footer button { min-height: 48px; padding: 0 16px; }
   [hidden] { display: none !important; }
 
+  body.has-remote main { padding-bottom: 380px; }
+  body.has-remote.remote-collapsed main { padding-bottom: 140px; }
+  #remote {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 5;
+    background: var(--panel);
+    border-top: 1px solid var(--line);
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+  #remote .inner {
+    max-width: 560px;
+    margin: 0 auto;
+    padding: 8px 16px calc(16px + env(safe-area-inset-bottom));
+  }
+  .remote-head { display: flex; align-items: center; gap: 8px; min-height: 48px; }
+  #remote-title { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .icon-btn {
+    width: 48px; height: 48px; padding: 0;
+    display: grid; place-items: center;
+    background: transparent; color: var(--text);
+    border-radius: 50%;
+  }
+  .icon-btn svg, .round svg { width: 24px; height: 24px; fill: currentColor; }
+  #remote-toggle svg { transition: transform 150ms; }
+  body.remote-collapsed #remote-toggle svg { transform: rotate(180deg); }
+  body.remote-collapsed .remote-body { display: none; }
+  #r-mini { display: none; }
+  body.remote-collapsed #r-mini { display: grid; }
+  .seek { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--muted); font-size: 14px; }
+  .seek span { min-width: 44px; font-variant-numeric: tabular-nums; }
+  .seek span:last-child { text-align: right; }
+  input[type=range] { flex: 1; min-width: 0; height: 48px; margin: 0; accent-color: var(--accent); background: transparent; }
+  .transport { display: flex; align-items: center; justify-content: space-between; margin: 8px 0; }
+  .round {
+    width: 48px; height: 48px; padding: 0;
+    display: grid; place-items: center;
+    border-radius: 50%;
+    background: transparent; color: var(--text); border-color: var(--line);
+    font-size: 14px;
+  }
+  .round.big { width: 72px; height: 72px; background: var(--accent); color: var(--on-accent); border-color: transparent; }
+  .round.big svg { width: 32px; height: 32px; }
+  .volume { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+  .volume svg { width: 24px; height: 24px; fill: currentColor; flex: none; }
+  #r-stop { width: 100%; margin-top: 8px; }
+
   #player {
     position: fixed;
     inset: 0;
@@ -202,8 +251,8 @@
   <header>
     <img src="/static/logo.svg" alt="">
     <h1>Promin</h1>
-    <div class="projector" title="Керування проектором з'явиться пізніше">
-      <span class="dot"></span><span>Проектор не на зв'язку</span>
+    <div class="projector" id="projector">
+      <span class="dot"></span><span id="tv-text">Проектор не на зв'язку</span>
     </div>
   </header>
 
@@ -224,6 +273,45 @@
     <form method="post" action="/logout"><button class="outline" type="submit">Вийти</button></form>
   </footer>
 </main>
+
+<section id="remote" hidden aria-label="Пульт проектора">
+  <div class="inner">
+    <div class="remote-head">
+      <div id="remote-title"></div>
+      <button id="r-mini" class="icon-btn" type="button" aria-label="Пауза або відтворення">
+        <svg viewBox="0 0 24 24"><path id="r-mini-icon" d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+      </button>
+      <button id="remote-toggle" class="icon-btn" type="button" aria-label="Згорнути або розгорнути пульт">
+        <svg viewBox="0 0 24 24"><path d="M7.4 8.6 12 13.2l4.6-4.6L18 10l-6 6-6-6z"/></svg>
+      </button>
+    </div>
+    <div class="remote-body">
+      <div class="seek">
+        <span id="r-pos">0:00</span>
+        <input id="r-seek" type="range" min="0" max="0" step="1" value="0" aria-label="Позиція у відео">
+        <span id="r-dur">0:00</span>
+      </div>
+      <div class="transport">
+        <button id="r-prev" class="round outline" type="button" aria-label="Попереднє відео">
+          <svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg>
+        </button>
+        <button id="r-back" class="round outline" type="button" aria-label="Назад на 10 секунд">−10</button>
+        <button id="r-play" class="round big" type="button" aria-label="Пауза або відтворення">
+          <svg viewBox="0 0 24 24"><path id="r-play-icon" d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+        </button>
+        <button id="r-fwd" class="round outline" type="button" aria-label="Вперед на 10 секунд">+10</button>
+        <button id="r-next" class="round outline" type="button" aria-label="Наступне відео">
+          <svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5l11 7L4 19z"/></svg>
+        </button>
+      </div>
+      <div class="volume">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9zm11.5 3a4 4 0 0 0-2-3.5v7a4 4 0 0 0 2-3.5z"/></svg>
+        <input id="r-vol" type="range" min="0" max="100" step="1" value="100" aria-label="Гучність відео">
+      </div>
+      <button id="r-stop" class="outline" type="button">Зупинити показ</button>
+    </div>
+  </div>
+</section>
 
 <div id="player" hidden>
   <div class="bar-top">
@@ -249,6 +337,15 @@
   var playerTitle = document.getElementById('player-title');
   var maxUpload = Infinity;
   var isAdmin = false;
+  var videosCache = [];
+  var ws = null;
+  var wsRetry = 1000;
+  var wsTimer = null;
+  var tvConnected = false;
+  var tvState = null;
+  var seeking = false;
+  var ICON_PAUSE = 'M6 5h4v14H6zM14 5h4v14h-4z';
+  var ICON_PLAY = 'M7 4.5v15l12-7.5z';
 
   function formatSize(bytes) {
     if (bytes < 1048576) return Math.max(1, Math.round(bytes / 1024)) + ' КБ';
@@ -351,6 +448,16 @@
       again.addEventListener('click', function () { retry(item.id); });
       actions.appendChild(again);
     } else {
+      if (item.status === 'ready') {
+        var cast = el('button', 'primary', 'На проектор');
+        cast.type = 'button';
+        cast.disabled = !canCast();
+        cast.addEventListener('click', function () {
+          document.body.classList.remove('remote-collapsed');
+          command('load', { video_id: item.id });
+        });
+        actions.appendChild(cast);
+      }
       var watch = el('button', 'outline', 'Дивитись тут');
       watch.type = 'button';
       watch.disabled = item.status !== 'ready';
@@ -375,6 +482,153 @@
     if (busy) pollTimer = setTimeout(refresh, 3000);
   }
 
+  function renderList() {
+    // Не перемальовуємо список без змін, щоб не закривати відкрите меню.
+    var snapshot = JSON.stringify([videosCache, canCast()]);
+    if (snapshot === lastRendered) return;
+    lastRendered = snapshot;
+    list.textContent = '';
+    if (!videosCache.length) {
+      list.appendChild(el('div', 'empty', 'Тут з’являться ваші відео'));
+      return;
+    }
+    videosCache.forEach(function (item) { list.appendChild(renderCard(item)); });
+  }
+
+  // ------------------------------------------------------------------ пульт
+
+  function canCast() {
+    return tvConnected && !!tvState && tvState.started;
+  }
+
+  function command(action, extra) {
+    message.textContent = '';
+    if (!ws || ws.readyState !== 1) {
+      message.textContent = 'Немає зв’язку із сервером. Спробуйте за кілька секунд.';
+      return;
+    }
+    var payload = { type: 'command', action: action };
+    for (var key in extra || {}) payload[key] = extra[key];
+    ws.send(JSON.stringify(payload));
+  }
+
+  function updateTv() {
+    var text = 'Проектор не на зв’язку';
+    if (tvConnected) {
+      text = tvState && !tvState.started ? 'Натисніть «Почати» на проекторі' : 'Проектор на зв’язку';
+    }
+    document.getElementById('tv-text').textContent = text;
+    document.getElementById('projector').className = 'projector' + (tvConnected ? ' on' : '');
+    renderList();
+    updateRemote();
+  }
+
+  function updateRemote() {
+    var panel = document.getElementById('remote');
+    var active = tvConnected && !!tvState && !!tvState.video_id;
+    panel.hidden = !active;
+    document.body.classList.toggle('has-remote', active);
+    if (!active) return;
+    document.getElementById('remote-title').textContent = tvState.name || '';
+    var icon = tvState.paused ? ICON_PLAY : ICON_PAUSE;
+    document.getElementById('r-play-icon').setAttribute('d', icon);
+    document.getElementById('r-mini-icon').setAttribute('d', icon);
+    var seek = document.getElementById('r-seek');
+    seek.max = Math.floor(tvState.duration || 0);
+    document.getElementById('r-dur').textContent = formatDuration(tvState.duration || 0);
+    if (!seeking) {
+      seek.value = Math.floor(tvState.position || 0);
+      document.getElementById('r-pos').textContent = formatDuration(tvState.position || 0);
+    }
+    if (document.activeElement !== document.getElementById('r-vol')) {
+      document.getElementById('r-vol').value = Math.round((tvState.volume || 0) * 100);
+    }
+    var ready = readyVideos();
+    var index = currentIndex(ready);
+    document.getElementById('r-prev').disabled = index <= 0;
+    document.getElementById('r-next').disabled = index < 0 || index >= ready.length - 1;
+  }
+
+  function readyVideos() {
+    return videosCache.filter(function (v) { return v.status === 'ready'; });
+  }
+
+  function currentIndex(ready) {
+    for (var i = 0; i < ready.length; i++) {
+      if (tvState && ready[i].id === tvState.video_id) return i;
+    }
+    return -1;
+  }
+
+  function step(delta) {
+    var ready = readyVideos();
+    var target = ready[currentIndex(ready) + delta];
+    if (target) command('load', { video_id: target.id });
+  }
+
+  function togglePlay() {
+    if (tvState) command(tvState.paused ? 'play' : 'pause');
+  }
+
+  function connect() {
+    clearTimeout(wsTimer);
+    if (ws && ws.readyState <= 1) return;
+    var scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    var socket = new WebSocket(scheme + location.host + '/ws?role=remote');
+    ws = socket;
+    socket.onopen = function () { wsRetry = 1000; };
+    socket.onmessage = function (event) {
+      var data;
+      try { data = JSON.parse(event.data); } catch (e) { return; }
+      if (data.type === 'tv') {
+        tvConnected = data.connected;
+        if (!tvConnected) tvState = null;
+        updateTv();
+      } else if (data.type === 'state') {
+        tvState = data;
+        updateTv();
+      } else if (data.type === 'error') {
+        message.textContent = data.message;
+      }
+    };
+    socket.onclose = function (event) {
+      if (ws !== socket) return;
+      ws = null;
+      if (event.code === 4401) { location.href = '/login'; return; }
+      tvConnected = false;
+      tvState = null;
+      updateTv();
+      wsTimer = setTimeout(connect, wsRetry);
+      wsRetry = Math.min(wsRetry * 2, 5000);
+    };
+  }
+
+  document.getElementById('r-play').addEventListener('click', togglePlay);
+  document.getElementById('r-mini').addEventListener('click', togglePlay);
+  document.getElementById('r-back').addEventListener('click', function () { command('seek_by', { value: -10 }); });
+  document.getElementById('r-fwd').addEventListener('click', function () { command('seek_by', { value: 10 }); });
+  document.getElementById('r-prev').addEventListener('click', function () { step(-1); });
+  document.getElementById('r-next').addEventListener('click', function () { step(1); });
+  document.getElementById('r-stop').addEventListener('click', function () { command('stop'); });
+  document.getElementById('remote-toggle').addEventListener('click', function () {
+    document.body.classList.toggle('remote-collapsed');
+  });
+  document.getElementById('r-seek').addEventListener('input', function () {
+    seeking = true;
+    document.getElementById('r-pos').textContent = formatDuration(Number(this.value));
+  });
+  document.getElementById('r-seek').addEventListener('change', function () {
+    seeking = false;
+    command('seek', { value: Number(this.value) });
+  });
+  document.getElementById('r-vol').addEventListener('input', function () {
+    command('volume', { value: Number(this.value) / 100 });
+  });
+  // Після розблокування телефона з'єднання відновлюємо одразу, не чекаючи таймера.
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') connect();
+  });
+
   function refresh() {
     return fetch('/api/videos')
       .then(function (r) {
@@ -386,16 +640,8 @@
         maxUpload = data.max_upload;
         disk.textContent = 'Вільно на сервері: ' + formatSize(data.disk.free);
         schedule(data);
-        // Не перемальовуємо список без змін, щоб не закривати відкрите меню.
-        var snapshot = JSON.stringify(data.videos);
-        if (snapshot === lastRendered) return;
-        lastRendered = snapshot;
-        list.textContent = '';
-        if (!data.videos.length) {
-          list.appendChild(el('div', 'empty', 'Тут з’являться ваші відео'));
-          return;
-        }
-        data.videos.forEach(function (item) { list.appendChild(renderCard(item)); });
+        videosCache = data.videos;
+        renderList();
       })
       .catch(function () {
         message.textContent = 'Не вдалося отримати список відео. Перевірте з’єднання із сервером.';
@@ -515,6 +761,7 @@
       uploadBtn.hidden = !isAdmin;
       disk.hidden = !isAdmin;
       document.getElementById('users-link').hidden = !isAdmin;
+      connect();
       return refresh();
     })
     .catch(function () {});

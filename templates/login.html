@@ -69,6 +69,7 @@
   <label for="password">Пароль</label>
   <input id="password" name="password" type="password" autocomplete="current-password"
          autocapitalize="none" autocorrect="off" spellcheck="false" required>
+  <input type="hidden" name="next" value="{{next}}">
   <button type="submit">Увійти</button>
   <p class="error" role="alert">{{error}}</p>
 </form>

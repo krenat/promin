@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Promin — проектор</title>
+<link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  /* Чисто чорний фон: чорне проектор не світить, тож смуги довкола відео зникають на стіні. */
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body {
+    color: #F2F0EA;
+    font: 400 28px/1.3 Manrope, system-ui, -apple-system, "Segoe UI", sans-serif;
+    cursor: none;
+  }
+  body.pointer { cursor: default; }
+  .screen {
+    position: absolute;
+    left: 0; top: 0; right: 0; bottom: 0;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 48px;
+  }
+  .screen.on { display: flex; }
+  .screen img { width: 160px; height: 160px; }
+  #waiting img { opacity: 0.35; }
+  .screen p { margin: 32px 0 0; color: #9AA0AA; }
+  button {
+    margin-top: 48px;
+    min-width: 320px;
+    height: 96px;
+    padding: 0 48px;
+    font: inherit;
+    font-size: 36px;
+    font-weight: 700;
+    color: #0F1115;
+    background: #FFC53D;
+    border: 0;
+    border-radius: 12px;
+    cursor: pointer;
+  }
+  button:focus { outline: 4px solid #F2F0EA; outline-offset: 6px; }
+  video {
+    position: absolute;
+    left: 0; top: 0;
+    width: 100%; height: 100%;
+    background: #000;
+    display: none;
+  }
+  video.on { display: block; }
+  #bar {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    padding: 0 48px 40px;
+    opacity: 0;
+    transition: opacity 150ms;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.75), rgba(0, 0, 0, 0));
+    pointer-events: none;
+  }
+  #bar.on { opacity: 1; }
+  #bar-title { padding-top: 64px; margin-bottom: 16px; font-weight: 600; }
+  #bar-track { height: 6px; background: rgba(242, 240, 234, 0.25); border-radius: 3px; overflow: hidden; }
+  #bar-fill { height: 100%; width: 0; background: #FFC53D; }
+</style>
+</head>
+<body>
+<video id="video" playsinline></video>
+
+<div class="screen on" id="start">
+  <img src="/static/logo.svg" alt="">
+  <button id="start-btn" type="button" autofocus>Почати</button>
+  <p>Натисніть один раз, щоб дозволити відтворення зі звуком</p>
+</div>
+
+<div class="screen" id="waiting">
+  <img src="/static/logo.svg" alt="">
+  <p id="waiting-text">Оберіть відео на телефоні</p>
+</div>
+
+<div class="screen" id="replaced">
+  <img src="/static/logo.svg" alt="">
+  <p>Показ відкрито на іншому екрані</p>
+  <button id="takeover-btn" type="button">Показувати тут</button>
+</div>
+
+<div id="bar">
+  <div id="bar-title"></div>
+  <div id="bar-track"><div id="bar-fill"></div></div>
+</div>
+
+<script>
+/* Навмисно простий JavaScript без нових можливостей мови: браузер проектора може бути старим. */
+(function () {
+  var video = document.getElementById('video');
+  var bar = document.getElementById('bar');
+  var barTitle = document.getElementById('bar-title');
+  var barFill = document.getElementById('bar-fill');
+  var waitingText = document.getElementById('waiting-text');
+  var screens = ['start', 'waiting', 'replaced'];
+
+  var ws = null;
+  var started = false;      // чи було натискання, яке дозволяє звук
+  var current = null;       // {id, name} відео, яке зараз показуємо
+  var retryDelay = 1000;
+  var retryTimer = null;
+  var barTimer = null;
+  var pointerTimer = null;
+
+  function showScreen(name) {
+    for (var i = 0; i < screens.length; i++) {
+      var node = document.getElementById(screens[i]);
+      node.className = 'screen' + (screens[i] === name ? ' on' : '');
+    }
+    video.className = name === 'playing' ? 'on' : '';
+    if (name !== 'playing') bar.className = '';
+  }
+
+  function sendState() {
+    if (!ws || ws.readyState !== 1) return;
+    var duration = video.duration;
+    ws.send(JSON.stringify({
+      type: 'state',
+      video_id: current ? current.id : null,
+      name: current ? current.name : null,
+      position: video.currentTime || 0,
+      duration: duration && isFinite(duration) ? duration : 0,
+      paused: video.paused,
+      volume: video.volume,
+      started: started
+    }));
+  }
+
+  function showBar() {
+    if (!current) return;
+    barTitle.textContent = current.name;
+    updateBar();
+    bar.className = 'on';
+    clearTimeout(barTimer);
+    barTimer = setTimeout(function () { bar.className = ''; }, 3000);
+  }
+
+  function updateBar() {
+    var duration = video.duration;
+    var share = duration && isFinite(duration) ? video.currentTime / duration : 0;
+    barFill.style.width = Math.max(0, Math.min(share, 1)) * 100 + '%';
+  }
+
+  function play() {
+    var result = video.play();
+    if (result && result['catch']) {
+      result['catch'](function () {
+        // Браузер не дав грати зі звуком: потрібне ще одне натискання.
+        if (video.paused && current) {
+          started = false;
+          showScreen('start');
+          document.getElementById('start-btn').focus();
+          sendState();
+        }
+      });
+    }
+  }
+
+  function stop() {
+    current = null;
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    showScreen(started ? 'waiting' : 'start');
+    sendState();
+  }
+
+  function seekTo(position) {
+    var duration = video.duration;
+    if (!current || !duration || !isFinite(duration)) return;
+    video.currentTime = Math.max(0, Math.min(position, duration - 0.5));
+  }
+
+  function handle(command) {
+    var action = command.action;
+    if (action === 'load') {
+      current = { id: command.video_id, name: command.name };
+      video.src = '/media/' + command.video_id;
+      if (started) {
+        showScreen('playing');
+        play();
+      }
+    } else if (!current) {
+      return;
+    } else if (action === 'play') {
+      play();
+    } else if (action === 'pause') {
+      video.pause();
+    } else if (action === 'seek') {
+      seekTo(command.value);
+    } else if (action === 'seek_by') {
+      seekTo(video.currentTime + command.value);
+    } else if (action === 'volume') {
+      video.volume = Math.max(0, Math.min(command.value, 1));
+    } else if (action === 'stop') {
+      stop();
+    }
+    sendState();
+  }
+
+  function connect() {
+    clearTimeout(retryTimer);
+    var scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    var socket = new WebSocket(scheme + location.host + '/ws?role=tv');
+    ws = socket;
+    socket.onopen = function () {
+      retryDelay = 1000;
+      waitingText.textContent = 'Оберіть відео на телефоні';
+      sendState();
+    };
+    socket.onmessage = function (event) {
+      var message;
+      try { message = JSON.parse(event.data); } catch (e) { return; }
+      if (message && message.type === 'command') handle(message);
+    };
+    socket.onclose = function (event) {
+      if (ws !== socket) return;
+      ws = null;
+      if (event.code === 4401) { location.href = '/login?next=/tv'; return; }
+      if (event.code === 4000) {
+        if (current) { video.pause(); }
+        showScreen('replaced');
+        document.getElementById('takeover-btn').focus();
+        return;
+      }
+      waitingText.textContent = 'Немає зв’язку із сервером, підключаюсь…';
+      retryTimer = setTimeout(connect, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, 5000);
+    };
+  }
+
+  video.addEventListener('play', sendState);
+  video.addEventListener('pause', function () { showBar(); sendState(); });
+  video.addEventListener('seeking', showBar);
+  video.addEventListener('seeked', sendState);
+  video.addEventListener('volumechange', sendState);
+  video.addEventListener('loadedmetadata', sendState);
+  video.addEventListener('timeupdate', updateBar);
+  video.addEventListener('ended', stop);
+  video.addEventListener('error', function () { if (current) stop(); });
+
+  document.getElementById('start-btn').addEventListener('click', function () {
+    started = true;
+    if (current) {
+      showScreen('playing');
+      play();
+    } else {
+      showScreen('waiting');
+    }
+    sendState();
+  });
+
+  document.getElementById('takeover-btn').addEventListener('click', function () {
+    showScreen(!started ? 'start' : current ? 'playing' : 'waiting');
+    connect();
+  });
+
+  // Курсор ховаємо, поки мишею не ворухнуть.
+  document.addEventListener('mousemove', function () {
+    document.body.className = 'pointer';
+    clearTimeout(pointerTimer);
+    pointerTimer = setTimeout(function () { document.body.className = ''; }, 3000);
+  });
+
+  setInterval(sendState, 1000);
+  connect();
+})();
+</script>
+</body>
+</html>

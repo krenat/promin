@@ -1,7 +1,7 @@
 """Promin — домашній відеосервер для проектора.
 
-Список відео, завантаження, перекодування, перегляд, видалення, користувачі з ролями.
-Пульт для проектора (етап 4) ще не доданий.
+Список відео, завантаження, перекодування, перегляд, видалення, користувачі з ролями
+і пульт: телефон керує сторінкою проектора через WebSocket.
 """
 from __future__ import annotations
 
@@ -26,11 +26,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote
 
 import anyio
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import (
+    APIRouter, Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from starlette.requests import ClientDisconnect
+from starlette.requests import ClientDisconnect, HTTPConnection
 
 log = logging.getLogger("promin")
 
@@ -43,6 +45,12 @@ PUBLIC_KEYS = ("id", "name", "size", "status", "created", "duration", "thumb", "
 COOKIE_NAME = "promin_session"
 COOKIE_MAX_AGE = 365 * 24 * 3600
 MIN_TOKEN_LENGTH = 12
+
+# Куди можна повернути після входу і які команди пульт може слати проектору.
+LOGIN_NEXT = ("/", "/tv")
+REMOTE_ACTIONS = ("load", "play", "pause", "seek", "seek_by", "volume", "stop")
+WS_REPLACED = 4000  # сторінку проектора відкрито деінде
+WS_UNAUTHORIZED = 4401
 
 # Вбудований адміністратор: його пароль — це PROMIN_TOKEN, у файлі він не зберігається.
 ADMIN = "admin"
@@ -594,6 +602,50 @@ class NewPassword(BaseModel):
     password: str
 
 
+# ------------------------------------------------------------------------ пульт
+
+
+class Hub:
+    """Зв'язує пульти з проектором. Стан живе в пам'яті одного процесу."""
+
+    def __init__(self) -> None:
+        self.tv: Optional[WebSocket] = None
+        self.remotes: set = set()
+        self.state: Optional[Dict[str, Any]] = None
+
+    @staticmethod
+    async def send(ws: WebSocket, message: Dict[str, Any]) -> None:
+        with suppress(Exception):  # з'єднання могло щойно обірватися
+            await ws.send_json(message)
+
+    async def broadcast(self, message: Dict[str, Any]) -> None:
+        for ws in list(self.remotes):
+            await self.send(ws, message)
+
+
+def clean_state(message: Dict[str, Any]) -> Dict[str, Any]:
+    """Стан від сторінки проектора: лише відомі поля відомих типів."""
+
+    def number(key: str) -> float:
+        try:
+            value = float(message.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return value if value == value and abs(value) != float("inf") else 0.0
+
+    video_id = message.get("video_id")
+    name = message.get("name")
+    return {
+        "video_id": str(video_id)[:64] if video_id else None,
+        "name": str(name)[:200] if name else None,
+        "position": number("position"),
+        "duration": number("duration"),
+        "volume": max(0.0, min(number("volume"), 1.0)),
+        "paused": bool(message.get("paused")),
+        "started": bool(message.get("started")),
+    }
+
+
 # ------------------------------------------------------------------- застосунок
 
 
@@ -619,6 +671,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     secret = hmac.new(settings.token.encode("utf-8"), b"promin-session", "sha256").digest()
     users = UserStore(settings.data_dir / "users.json")
     limiter = LoginLimiter()
+    hub = Hub()
     store = Store(settings.data_dir / "videos.json")
     transcoder = Transcoder(settings, store)
 
@@ -642,6 +695,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.state.store = store
     app.state.transcoder = transcoder
     app.state.users = users
+    app.state.hub = hub
     app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
     def fingerprint(username: str) -> Optional[str]:
@@ -655,7 +709,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         message = (username + "|" + (fingerprint(username) or "")).encode("utf-8")
         return username + "." + hmac.new(secret, message, "sha256").hexdigest()
 
-    def current_user(request: Request) -> Optional[Dict[str, Any]]:
+    def current_user(request: HTTPConnection) -> Optional[Dict[str, Any]]:
         raw = request.cookies.get(COOKIE_NAME, "")
         username = raw.partition(".")[0]
         if not username or fingerprint(username) is None:
@@ -689,18 +743,25 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @app.exception_handler(NotAuthenticated)
     async def not_authenticated(request: Request, exc: NotAuthenticated) -> Response:
         if request.method == "GET" and not request.url.path.startswith("/api/"):
-            return RedirectResponse("/login", status_code=303)
+            path = request.url.path
+            target = "/login?next=" + path if path in LOGIN_NEXT and path != "/" else "/login"
+            return RedirectResponse(target, status_code=303)
         return JSONResponse({"detail": "Потрібен вхід"}, status_code=401)
 
-    def login_page(error: str = "", status_code: int = 200) -> HTMLResponse:
+    def safe_next(value: Optional[str]) -> str:
+        return value if value in LOGIN_NEXT else "/"
+
+    def login_page(error: str = "", status_code: int = 200, next_path: str = "/") -> HTMLResponse:
         page = (BASE_DIR / "templates" / "login.html").read_text(encoding="utf-8")
-        return HTMLResponse(page.replace("{{error}}", html.escape(error)), status_code)
+        page = page.replace("{{error}}", html.escape(error)).replace("{{next}}", next_path)
+        return HTMLResponse(page, status_code)
 
     @app.get("/login")
     async def login_form(request: Request) -> Response:
+        next_path = safe_next(request.query_params.get("next"))
         if current_user(request):
-            return RedirectResponse("/", status_code=303)
-        return login_page()
+            return RedirectResponse(next_path, status_code=303)
+        return login_page(next_path=next_path)
 
     @app.post("/login")
     async def login(request: Request) -> Response:
@@ -712,11 +773,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         form = parse_qs((await request.body()).decode("utf-8", errors="replace"))
         username = (form.get("username") or [""])[0].strip().lower()
         password = (form.get("password") or [""])[0]
+        next_path = safe_next((form.get("next") or [""])[0])
         if not await check_password(username, password):
             limiter.fail(ip)
-            return login_page("Неправильний логін або пароль.", 401)
+            return login_page("Неправильний логін або пароль.", 401, next_path)
         limiter.reset(ip)
-        response = RedirectResponse("/", status_code=303)
+        response = RedirectResponse(next_path, status_code=303)
         response.set_cookie(
             COOKIE_NAME, session_cookie(username),
             max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax",
@@ -736,6 +798,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @router.get("/api/me")
     async def me(request: Request) -> Dict[str, Any]:
         return require_auth(request)
+
+    @router.get("/tv", response_class=HTMLResponse)
+    async def tv_page() -> str:
+        return (BASE_DIR / "templates" / "tv.html").read_text(encoding="utf-8")
 
     @router.get("/users", response_class=HTMLResponse)
     async def users_page(request: Request) -> Response:
@@ -904,6 +970,80 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         transcoder.cancel(video_id)
         remove_files(settings, video_id)
         return Response(status_code=204)
+
+    @app.websocket("/ws")
+    async def websocket(ws: WebSocket) -> None:
+        role = ws.query_params.get("role")
+        await ws.accept()
+        if current_user(ws) is None:
+            await ws.close(code=WS_UNAUTHORIZED)
+            return
+        if role == "tv":
+            await serve_tv(ws)
+        elif role == "remote":
+            await serve_remote(ws)
+        else:
+            await ws.close(code=1008)
+
+    async def serve_tv(ws: WebSocket) -> None:
+        # Проектор один: нове з'єднання стає активним, попереднє закривається.
+        previous, hub.tv, hub.state = hub.tv, ws, None
+        if previous is not None:
+            with suppress(Exception):
+                await previous.close(code=WS_REPLACED)
+        await hub.broadcast({"type": "tv", "connected": True})
+        try:
+            while True:
+                message = await ws.receive_json()
+                if isinstance(message, dict) and message.get("type") == "state":
+                    hub.state = clean_state(message)
+                    await hub.broadcast({"type": "state", **hub.state})
+        except WebSocketDisconnect:
+            pass
+        except Exception:  # сторінка надіслала щось, що не є JSON
+            with suppress(Exception):
+                await ws.close(code=1003)
+        finally:
+            if hub.tv is ws:
+                hub.tv, hub.state = None, None
+                await hub.broadcast({"type": "tv", "connected": False})
+
+    async def serve_remote(ws: WebSocket) -> None:
+        hub.remotes.add(ws)
+        await hub.send(ws, {"type": "tv", "connected": hub.tv is not None})
+        if hub.state is not None:
+            await hub.send(ws, {"type": "state", **hub.state})
+        try:
+            while True:
+                message = await ws.receive_json()
+                if not isinstance(message, dict) or message.get("type") != "command":
+                    continue
+                action = message.get("action")
+                if action not in REMOTE_ACTIONS:
+                    continue
+                if hub.tv is None:
+                    await hub.send(ws, {"type": "error", "message": "Проектор не на зв'язку"})
+                    continue
+                command: Dict[str, Any] = {"type": "command", "action": action}
+                if action == "load":
+                    item = store.get(str(message.get("video_id")))
+                    if not item or item["status"] != "ready":
+                        await hub.send(ws, {"type": "error", "message": "Це відео недоступне"})
+                        continue
+                    command.update(video_id=item["id"], name=item["name"])
+                elif action in ("seek", "seek_by", "volume"):
+                    try:
+                        command["value"] = float(message.get("value"))
+                    except (TypeError, ValueError):
+                        continue
+                await hub.send(hub.tv, command)
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            with suppress(Exception):
+                await ws.close(code=1003)
+        finally:
+            hub.remotes.discard(ws)
 
     app.include_router(router)
     app.include_router(admin)
