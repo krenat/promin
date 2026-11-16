@@ -41,7 +41,10 @@ BASE_DIR = Path(__file__).resolve().parent
 MB = 1024 * 1024
 
 ALLOWED_EXT = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".3gp"}
-PUBLIC_KEYS = ("id", "name", "size", "status", "created", "duration", "thumb", "error")
+PUBLIC_KEYS = ("id", "name", "size", "status", "created", "duration", "thumb", "thumb_v", "error")
+
+# Версія способу, яким зроблено мініатюру: після її зміни старі мініатюри перероблюються.
+THUMB_VERSION = 2
 
 COOKIE_NAME = "promin_session"
 COOKIE_MAX_AGE = 365 * 24 * 3600
@@ -332,6 +335,7 @@ class Transcoder:
         self.progress: Dict[str, float] = {}
         self._queue: Optional[asyncio.Queue] = None
         self._task: Optional[asyncio.Task] = None
+        self._thumb_task: Optional[asyncio.Task] = None
         self._current_id: Optional[str] = None
         self._current_proc: Optional[asyncio.subprocess.Process] = None
 
@@ -351,12 +355,35 @@ class Transcoder:
             self.store.update(item["id"], status="queued", error=None)
             self.enqueue(item["id"])
         self._task = asyncio.create_task(self._run())
+        self._thumb_task = asyncio.create_task(self._refresh_thumbnails())
 
     async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._task
+        for task in (self._thumb_task, self._task):
+            if task:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    async def _refresh_thumbnails(self) -> None:
+        """Перероблює мініатюри, зроблені старим способом (часто це був чорний кадр)."""
+        if not self.ffmpeg:
+            return
+        for item in self.store.list():
+            if item["status"] != "ready" or item.get("thumb_v") == THUMB_VERSION:
+                continue
+            video = self.settings.videos_dir / (item["id"] + ".mp4")
+            if not video.is_file():
+                continue
+            try:
+                made = await self._thumbnail(video, item["id"], item.get("duration") or 0)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Не вдалося переробити мініатюру %s", item["id"])
+                continue
+            self.store.update(
+                item["id"], thumb=made or bool(item.get("thumb")), thumb_v=THUMB_VERSION
+            )
 
     def enqueue(self, video_id: str) -> None:
         assert self._queue is not None
@@ -415,6 +442,7 @@ class Transcoder:
                 size=final.stat().st_size,
                 duration=plan["duration"] or None,
                 thumb=thumb,
+                thumb_v=THUMB_VERSION,
                 error=None,
             )
             if not updated:
@@ -479,17 +507,34 @@ class Transcoder:
 
     async def _thumbnail(self, video: Path, video_id: str, duration: float) -> bool:
         out = self.settings.thumbs_dir / (video_id + ".jpg")
+        tmp = self.settings.thumbs_dir / (video_id + ".tmp.jpg")
         proc = await asyncio.create_subprocess_exec(
-            self.ffmpeg, "-nostdin", "-y", "-v", "error",
-            "-ss", "%.2f" % min(1.0, duration / 2), "-i", str(video),
-            "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "5", str(out),
+            *thumbnail_args(self.ffmpeg, video, tmp, duration),
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         try:
             await proc.wait()
         finally:
             await self._reap(proc)
-        return proc.returncode == 0 and out.is_file()
+        if proc.returncode != 0 or not tmp.is_file():
+            tmp.unlink(missing_ok=True)
+            return False
+        os.replace(tmp, out)
+        return True
+
+
+def thumbnail_args(ffmpeg: str, video: Path, out: Path, duration: float) -> List[str]:
+    """Кадр для мініатюри: не з самого початку, де часто чорний екран або заставка."""
+    if duration > 20:
+        # З десятої частини відео беремо найтиповіший кадр із двох секунд.
+        seek, filters = duration * 0.1, "thumbnail=50,scale=640:-2"
+    else:
+        seek, filters = min(1.0, duration / 2), "scale=640:-2"
+    return [
+        ffmpeg, "-nostdin", "-y", "-v", "error",
+        "-ss", "%.2f" % seek, "-i", str(video),
+        "-frames:v", "1", "-vf", filters, "-q:v", "5", "-f", "image2", str(out),
+    ]
 
 
 # ------------------------------------------------------------------------- вхід
