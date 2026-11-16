@@ -341,6 +341,10 @@ def test_pages_redirect_to_login(anon):
         r = anon.get(path)
         assert r.status_code == 303, path
         assert r.headers["location"] == "/login"
+    # Зі сторінки проектора після входу повертаємо назад на неї.
+    r = anon.get("/tv")
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login?next=/tv"
 
 
 def test_api_requires_login(anon, tmp_path):
@@ -536,3 +540,127 @@ def test_users_survive_restart(tmp_path):
     with make_client(tmp_path, login=False) as c:
         c.follow_redirects = False
         assert sign_in(c, "olena", VIEWER_PASSWORD).status_code == 303
+
+
+# ------------------------------------------------------------------------ пульт
+
+from starlette.websockets import WebSocketDisconnect  # noqa: E402
+
+
+def tv_state(**fields) -> dict:
+    state = {
+        "type": "state", "video_id": None, "name": None, "position": 0, "duration": 0,
+        "paused": True, "volume": 1, "started": True,
+    }
+    state.update(fields)
+    return state
+
+
+def test_login_returns_to_tv_page(anon):
+    assert 'name="next" value="/tv"' in anon.get("/login?next=/tv").text
+    r = anon.post("/login", data={"username": "admin", "password": TOKEN, "next": "/tv"})
+    assert r.status_code == 303 and r.headers["location"] == "/tv"
+    assert anon.get("/tv").status_code == 200
+
+
+def test_login_ignores_foreign_next(anon):
+    assert 'value="/"' in anon.get("/login?next=https://evil.example/").text
+    r = anon.post(
+        "/login", data={"username": "admin", "password": TOKEN, "next": "//evil.example"}
+    )
+    assert r.headers["location"] == "/"
+
+
+def test_websocket_requires_login(anon):
+    with anon.websocket_connect("/ws?role=remote") as ws:
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_json()
+    assert closed.value.code == 4401
+
+
+def test_remote_sees_projector_come_and_go(client):
+    with client.websocket_connect("/ws?role=remote") as remote:
+        assert remote.receive_json() == {"type": "tv", "connected": False}
+        with client.websocket_connect("/ws?role=tv") as tv:
+            assert remote.receive_json() == {"type": "tv", "connected": True}
+            tv.send_json(tv_state(position=12.5, duration=60, paused=False, video_id="abc", name="Clip"))
+            state = remote.receive_json()
+            assert state["type"] == "state"
+            assert (state["video_id"], state["position"], state["paused"]) == ("abc", 12.5, False)
+        assert remote.receive_json() == {"type": "tv", "connected": False}
+
+
+def test_new_remote_gets_current_state(client):
+    with client.websocket_connect("/ws?role=tv") as tv:
+        with client.websocket_connect("/ws?role=remote") as first:
+            assert first.receive_json()["connected"] is True
+            tv.send_json(tv_state(video_id="abc", name="Clip", position=5))
+            assert first.receive_json()["position"] == 5
+            with client.websocket_connect("/ws?role=remote") as second:
+                assert second.receive_json() == {"type": "tv", "connected": True}
+                assert second.receive_json()["video_id"] == "abc"
+
+
+def test_commands_without_projector_report_error(client):
+    with client.websocket_connect("/ws?role=remote") as remote:
+        remote.receive_json()
+        remote.send_json({"type": "command", "action": "pause"})
+        assert remote.receive_json()["type"] == "error"
+
+
+@needs_ffmpeg
+def test_remote_controls_projector(client, viewer, small_clip):
+    video = wait_done(client, upload(client, small_clip, name="party.mp4").json()["id"])
+    # Глядач теж може керувати показом.
+    with client.websocket_connect("/ws?role=tv") as tv, viewer.websocket_connect("/ws?role=remote") as remote:
+        assert remote.receive_json()["connected"] is True
+
+        remote.send_json({"type": "command", "action": "load", "video_id": video["id"]})
+        assert tv.receive_json() == {
+            "type": "command", "action": "load", "video_id": video["id"], "name": "party.mp4",
+        }
+        remote.send_json({"type": "command", "action": "seek", "value": 42})
+        assert tv.receive_json() == {"type": "command", "action": "seek", "value": 42.0}
+        remote.send_json({"type": "command", "action": "seek_by", "value": -10})
+        assert tv.receive_json() == {"type": "command", "action": "seek_by", "value": -10.0}
+        remote.send_json({"type": "command", "action": "volume", "value": 0.4})
+        assert tv.receive_json() == {"type": "command", "action": "volume", "value": 0.4}
+        for action in ("pause", "play", "stop"):
+            remote.send_json({"type": "command", "action": action})
+            assert tv.receive_json() == {"type": "command", "action": action}
+
+        # Невідоме відео, невідома дія і сміття до проектора не доходять.
+        remote.send_json({"type": "command", "action": "load", "video_id": "nope"})
+        assert remote.receive_json() == {"type": "error", "message": "Це відео недоступне"}
+        remote.send_json({"type": "command", "action": "format_disk"})
+        remote.send_json({"type": "command", "action": "seek", "value": "soon"})
+        remote.send_json({"type": "command", "action": "pause"})
+        assert tv.receive_json() == {"type": "command", "action": "pause"}
+
+
+def test_second_projector_replaces_first(client):
+    with client.websocket_connect("/ws?role=remote") as remote:
+        remote.receive_json()
+        with client.websocket_connect("/ws?role=tv") as first:
+            assert remote.receive_json()["connected"] is True
+            with client.websocket_connect("/ws?role=tv") as second:
+                with pytest.raises(WebSocketDisconnect) as closed:
+                    first.receive_json()
+                assert closed.value.code == 4000
+                assert remote.receive_json()["connected"] is True
+                # Команди йдуть уже новому проектору.
+                remote.send_json({"type": "command", "action": "play"})
+                assert second.receive_json() == {"type": "command", "action": "play"}
+
+
+def test_projector_state_is_sanitized(client):
+    with client.websocket_connect("/ws?role=remote") as remote:
+        remote.receive_json()
+        with client.websocket_connect("/ws?role=tv") as tv:
+            remote.receive_json()
+            tv.send_json({"type": "state", "position": "abc", "volume": 7, "extra": "<script>", "name": "x" * 500})
+            state = remote.receive_json()
+            assert state["position"] == 0
+            assert state["volume"] == 1
+            assert "extra" not in state
+            assert len(state["name"]) == 200
