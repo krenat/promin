@@ -341,10 +341,10 @@ def test_pages_redirect_to_login(anon):
         r = anon.get(path)
         assert r.status_code == 303, path
         assert r.headers["location"] == "/login"
-    # Зі сторінки проектора після входу повертаємо назад на неї.
+    # Сторінка проектора відкрита: без входу вона лише показує код підключення.
     r = anon.get("/tv")
-    assert r.status_code == 303
-    assert r.headers["location"] == "/login?next=/tv"
+    assert r.status_code == 200
+    assert "pair-code" in r.text
 
 
 def test_api_requires_login(anon, tmp_path):
@@ -664,3 +664,145 @@ def test_projector_state_is_sanitized(client):
             assert state["volume"] == 1
             assert "extra" not in state
             assert len(state["name"]) == 200
+
+
+# ------------------------------------------------------ підключення проектора кодом
+
+
+def start_pairing(tv: TestClient) -> dict:
+    r = tv.post("/api/pair/start")
+    assert r.status_code == 200
+    return r.json()
+
+
+def pair_status(tv: TestClient, token: str) -> str:
+    return tv.post("/api/pair/status", json={"token": token}).json()["status"]
+
+
+@pytest.fixture
+def projector(client):
+    """Клієнт без входу, який грає роль браузера проектора."""
+    return TestClient(client.app, follow_redirects=False)
+
+
+def test_projector_is_paired_by_code(client, projector):
+    assert projector.get("/api/me").status_code == 401
+    pairing = start_pairing(projector)
+    assert len(pairing["code"]) == 6 and pairing["code"].isdigit()
+    assert pair_status(projector, pairing["token"]) == "pending"
+
+    # Код вводять на телефоні, де вже увійшли; пробіл посередині не заважає.
+    spaced = pairing["code"][:3] + " " + pairing["code"][3:]
+    assert client.post("/api/pair/approve", json={"code": spaced}).status_code == 200
+
+    r = projector.post("/api/pair/status", json={"token": pairing["token"]})
+    assert r.json()["status"] == "approved"
+    cookie = r.headers["set-cookie"].lower()
+    assert "httponly" in cookie and "max-age=31536000" in cookie
+
+    me = projector.get("/api/me").json()
+    assert me["role"] == "device"
+    with projector.websocket_connect("/ws?role=tv") as tv, client.websocket_connect("/ws?role=remote") as remote:
+        assert remote.receive_json() == {"type": "tv", "connected": True}
+        remote.send_json({"type": "command", "action": "pause"})
+        assert tv.receive_json() == {"type": "command", "action": "pause"}
+
+
+def test_code_works_only_once(client, projector):
+    pairing = start_pairing(projector)
+    assert client.post("/api/pair/approve", json={"code": pairing["code"]}).status_code == 200
+    assert client.post("/api/pair/approve", json={"code": pairing["code"]}).status_code == 404
+    assert pair_status(projector, pairing["token"]) == "approved"
+    assert pair_status(projector, pairing["token"]) == "expired"
+
+
+def test_wrong_or_unknown_code_is_rejected(client, projector):
+    pairing = start_pairing(projector)
+    wrong = "%06d" % ((int(pairing["code"]) + 1) % 10**6)
+    assert client.post("/api/pair/approve", json={"code": wrong}).status_code == 404
+    assert client.post("/api/pair/approve", json={"code": "12"}).status_code == 404
+    assert pair_status(projector, pairing["token"]) == "pending"
+    assert pair_status(projector, "no-such-token") == "expired"
+
+
+def test_code_expires(client, projector):
+    pairing = start_pairing(projector)
+    client.app.state.pairing.pending[pairing["token"]]["created"] -= 11 * 60
+    assert client.post("/api/pair/approve", json={"code": pairing["code"]}).status_code == 404
+    assert pair_status(projector, pairing["token"]) == "expired"
+
+
+def test_approving_requires_a_logged_in_user(client, projector, viewer):
+    pairing = start_pairing(projector)
+    assert projector.post("/api/pair/approve", json={"code": pairing["code"]}).status_code == 401
+    # Глядач теж може підключити проектор.
+    assert viewer.post("/api/pair/approve", json={"code": pairing["code"]}).status_code == 200
+    assert pair_status(projector, pairing["token"]) == "approved"
+    # А сам проектор підключати інші проектори не може.
+    other = TestClient(client.app, follow_redirects=False)
+    second = start_pairing(other)
+    assert projector.post("/api/pair/approve", json={"code": second["code"]}).status_code == 403
+
+
+def test_projector_can_only_show(client, projector):
+    pairing = start_pairing(projector)
+    client.post("/api/pair/approve", json={"code": pairing["code"]})
+    pair_status(projector, pairing["token"])
+
+    assert projector.get("/api/videos").status_code == 200
+    assert upload(projector, b"x" * 100).status_code == 403
+    assert projector.get("/api/users").status_code == 403
+    assert projector.get("/api/devices").status_code == 403
+    assert add_user(projector, "petro").status_code == 403
+
+
+def test_admin_can_disconnect_projector(client, projector):
+    pairing = start_pairing(projector)
+    client.post("/api/pair/approve", json={"code": pairing["code"]})
+    pair_status(projector, pairing["token"])
+
+    devices = client.get("/api/devices").json()["devices"]
+    assert len(devices) == 1
+    assert devices[0]["approved_by"] == "admin"
+    assert "hash" not in devices[0]
+
+    with projector.websocket_connect("/ws?role=tv") as tv:
+        assert client.delete("/api/devices/" + devices[0]["id"]).status_code == 204
+        with pytest.raises(WebSocketDisconnect) as closed:
+            tv.receive_json()
+        assert closed.value.code == 4401
+    assert projector.get("/api/me").status_code == 401
+    assert client.get("/api/devices").json()["devices"] == []
+    assert client.delete("/api/devices/" + devices[0]["id"]).status_code == 404
+
+
+def test_forged_device_cookie_is_rejected(client, projector):
+    pairing = start_pairing(projector)
+    client.post("/api/pair/approve", json={"code": pairing["code"]})
+    pair_status(projector, pairing["token"])
+    device_id = client.get("/api/devices").json()["devices"][0]["id"]
+
+    forged = TestClient(client.app, follow_redirects=False)
+    forged.cookies.set("promin_session", "@%s.%s" % (device_id, "guess"))
+    assert forged.get("/api/me").status_code == 401
+    forged.cookies.set("promin_session", "@nope.guess")
+    assert forged.get("/api/me").status_code == 401
+
+
+def test_pairing_starts_are_limited(projector):
+    for _ in range(10):
+        assert projector.post("/api/pair/start").status_code == 200
+    assert projector.post("/api/pair/start").status_code == 429
+
+
+def test_devices_survive_restart(tmp_path):
+    with make_client(tmp_path) as c:
+        tv = TestClient(c.app, follow_redirects=False)
+        pairing = start_pairing(tv)
+        c.post("/api/pair/approve", json={"code": pairing["code"]})
+        cookie = tv.post("/api/pair/status", json={"token": pairing["token"]}).cookies["promin_session"]
+        # Секрет пристрою у файлі не лежить відкритим текстом.
+        assert cookie.split(".", 1)[1] not in (tmp_path / "devices.json").read_text(encoding="utf-8")
+    with make_client(tmp_path, login=False) as c:
+        c.cookies.set("promin_session", cookie)
+        assert c.get("/api/me").json()["role"] == "device"

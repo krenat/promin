@@ -1,7 +1,8 @@
 """Promin — домашній відеосервер для проектора.
 
 Список відео, завантаження, перекодування, перегляд, видалення, користувачі з ролями
-і пульт: телефон керує сторінкою проектора через WebSocket.
+і пульт: телефон керує сторінкою проектора через WebSocket. Проектор підключається
+кодом з екрана, який підтверджують на телефоні.
 """
 from __future__ import annotations
 
@@ -51,6 +52,11 @@ LOGIN_NEXT = ("/", "/tv")
 REMOTE_ACTIONS = ("load", "play", "pause", "seek", "seek_by", "volume", "stop")
 WS_REPLACED = 4000  # сторінку проектора відкрито деінде
 WS_UNAUTHORIZED = 4401
+
+# Підключення проектора кодом: скільки живе код і скільки їх може чекати водночас.
+PAIR_CODE_TTL = 10 * 60
+PAIR_MAX_PENDING = 50
+PAIR_STARTS_PER_WINDOW = 10
 
 # Вбудований адміністратор: його пароль — це PROMIN_TOKEN, у файлі він не зберігається.
 ADMIN = "admin"
@@ -592,6 +598,102 @@ class UserStore:
             return True
 
 
+class DeviceStore:
+    """Підключені проектори. Зберігаємо лише хеш секрету з cookie пристрою."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._devices: Dict[str, Dict[str, Any]] = {}
+
+    def load(self) -> None:
+        with self._lock:
+            if self.path.exists():
+                self._devices = json.loads(self.path.read_text(encoding="utf-8"))
+            else:
+                self._devices = {}
+
+    def _save(self) -> None:
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps(self._devices, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.path)
+
+    def add(self, name: str, approved_by: str) -> str:
+        """Створює пристрій і повертає значення його cookie."""
+        device_id = secrets.token_hex(8)
+        secret = secrets.token_urlsafe(32)
+        with self._lock:
+            self._devices[device_id] = {
+                "name": name,
+                "hash": hashlib.sha256(secret.encode("utf-8")).hexdigest(),
+                "approved_by": approved_by,
+                "created": time.time(),
+            }
+            self._save()
+        return "@%s.%s" % (device_id, secret)
+
+    def get(self, device_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            device = self._devices.get(device_id)
+            return dict(device) if device else None
+
+    def list(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            items = [
+                {"id": key, "name": d["name"], "approved_by": d["approved_by"], "created": d["created"]}
+                for key, d in self._devices.items()
+            ]
+        return sorted(items, key=lambda item: item["created"])
+
+    def remove(self, device_id: str) -> bool:
+        with self._lock:
+            if device_id not in self._devices:
+                return False
+            del self._devices[device_id]
+            self._save()
+            return True
+
+
+class Pairing:
+    """Коди, які зараз показують проектори. Живуть лише в пам'яті."""
+
+    def __init__(self) -> None:
+        self.pending: Dict[str, Dict[str, Any]] = {}  # токен опитування → запис
+
+    def purge(self) -> None:
+        cutoff = time.monotonic() - PAIR_CODE_TTL
+        for token in [t for t, entry in self.pending.items() if entry["created"] < cutoff]:
+            del self.pending[token]
+
+    def start(self) -> Optional[Dict[str, Any]]:
+        self.purge()
+        if len(self.pending) >= PAIR_MAX_PENDING:
+            return None
+        taken = {entry["code"] for entry in self.pending.values()}
+        code = "%06d" % secrets.randbelow(10**6)
+        while code in taken:
+            code = "%06d" % secrets.randbelow(10**6)
+        token = secrets.token_urlsafe(24)
+        self.pending[token] = {"code": code, "created": time.monotonic(), "cookie": None}
+        return {"code": code, "token": token, "expires_in": PAIR_CODE_TTL}
+
+    def by_code(self, code: str) -> Optional[Dict[str, Any]]:
+        self.purge()
+        for entry in self.pending.values():
+            if entry["cookie"] is None and same(entry["code"], code):
+                return entry
+        return None
+
+
+class PairToken(BaseModel):
+    token: str
+
+
+class PairCode(BaseModel):
+    code: str
+
+
 class NewUser(BaseModel):
     username: str
     password: str
@@ -670,7 +772,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # Ключ для підпису cookie; сам токен у cookie не потрапляє.
     secret = hmac.new(settings.token.encode("utf-8"), b"promin-session", "sha256").digest()
     users = UserStore(settings.data_dir / "users.json")
+    devices = DeviceStore(settings.data_dir / "devices.json")
+    pairing = Pairing()
     limiter = LoginLimiter()
+    pair_start_limiter = LoginLimiter(PAIR_STARTS_PER_WINDOW, PAIR_CODE_TTL)
+    pair_code_limiter = LoginLimiter(10, LOGIN_WINDOW_SECONDS)
     hub = Hub()
     store = Store(settings.data_dir / "videos.json")
     transcoder = Transcoder(settings, store)
@@ -686,6 +792,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             leftover.unlink(missing_ok=True)
         store.load()
         users.load()
+        devices.load()
         await transcoder.start()
         yield
         await transcoder.stop()
@@ -696,6 +803,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.state.transcoder = transcoder
     app.state.users = users
     app.state.hub = hub
+    app.state.devices = devices
+    app.state.pairing = pairing
     app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
     def fingerprint(username: str) -> Optional[str]:
@@ -711,6 +820,13 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     def current_user(request: HTTPConnection) -> Optional[Dict[str, Any]]:
         raw = request.cookies.get(COOKIE_NAME, "")
+        if raw.startswith("@"):  # підключений проектор
+            device_id, _, secret = raw[1:].partition(".")
+            device = devices.get(device_id)
+            digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+            if device is None or not same(digest, device["hash"]):
+                return None
+            return {"username": device["name"], "role": "device", "device_id": device_id}
         username = raw.partition(".")[0]
         if not username or fingerprint(username) is None:
             return None
@@ -785,6 +901,38 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         )
         return response
 
+    # Сторінка проектора відкрита всім: без входу вона лише показує код підключення.
+    @app.get("/tv", response_class=HTMLResponse)
+    async def tv_page() -> str:
+        return (BASE_DIR / "templates" / "tv.html").read_text(encoding="utf-8")
+
+    @app.post("/api/pair/start")
+    async def pair_start(request: Request) -> Dict[str, Any]:
+        ip = request.client.host if request.client else "unknown"
+        if pair_start_limiter.blocked(ip):
+            raise HTTPException(429, "Забагато спроб. Спробуйте пізніше.")
+        pair_start_limiter.fail(ip)
+        started = pairing.start()
+        if started is None:
+            raise HTTPException(429, "Забагато пристроїв чекає на підключення.")
+        return started
+
+    @app.post("/api/pair/status")
+    async def pair_status(body: PairToken) -> Response:
+        pairing.purge()
+        entry = pairing.pending.get(body.token)
+        if entry is None:
+            return JSONResponse({"status": "expired"})
+        if entry["cookie"] is None:
+            return JSONResponse({"status": "pending"})
+        # Код підтвердили на телефоні: видаємо проектору його cookie, код більше не діє.
+        del pairing.pending[body.token]
+        response = JSONResponse({"status": "approved"})
+        response.set_cookie(
+            COOKIE_NAME, entry["cookie"], max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax"
+        )
+        return response
+
     @app.post("/logout")
     async def logout() -> Response:
         response = RedirectResponse("/login", status_code=303)
@@ -799,9 +947,35 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     async def me(request: Request) -> Dict[str, Any]:
         return require_auth(request)
 
-    @router.get("/tv", response_class=HTMLResponse)
-    async def tv_page() -> str:
-        return (BASE_DIR / "templates" / "tv.html").read_text(encoding="utf-8")
+    @router.post("/api/pair/approve")
+    async def pair_approve(body: PairCode, request: Request) -> Dict[str, Any]:
+        user = require_auth(request)
+        if user["role"] == "device":
+            raise HTTPException(403, "Підключати проектор може лише користувач")
+        if pair_code_limiter.blocked(user["username"]):
+            raise HTTPException(429, "Забагато спроб. Спробуйте знову за 15 хвилин.")
+        code = "".join(ch for ch in body.code if ch.isdigit())
+        entry = pairing.by_code(code) if len(code) == 6 else None
+        if entry is None:
+            pair_code_limiter.fail(user["username"])
+            raise HTTPException(404, "Код не знайдено або він уже не діє")
+        entry["cookie"] = devices.add("Проектор", user["username"])
+        return {"ok": True}
+
+    @admin.get("/api/devices")
+    async def list_devices() -> Dict[str, Any]:
+        return {"devices": devices.list()}
+
+    @admin.delete("/api/devices/{device_id}", status_code=204)
+    async def delete_device(device_id: str) -> Response:
+        if not devices.remove(device_id):
+            raise HTTPException(404, "Пристрій не знайдено")
+        # Якщо цей проектор зараз на зв'язку, показ на ньому одразу припиняється.
+        tv = hub.tv
+        if tv is not None and getattr(tv.state, "device_id", None) == device_id:
+            with suppress(Exception):
+                await tv.close(code=WS_UNAUTHORIZED)
+        return Response(status_code=204)
 
     @router.get("/users", response_class=HTMLResponse)
     async def users_page(request: Request) -> Response:
@@ -975,9 +1149,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     async def websocket(ws: WebSocket) -> None:
         role = ws.query_params.get("role")
         await ws.accept()
-        if current_user(ws) is None:
+        user = current_user(ws)
+        if user is None:
             await ws.close(code=WS_UNAUTHORIZED)
             return
+        ws.state.device_id = user.get("device_id")
         if role == "tv":
             await serve_tv(ws)
         elif role == "remote":
