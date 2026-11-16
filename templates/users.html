@@ -41,7 +41,8 @@
   .primary { background: var(--accent); color: var(--on-accent); width: 100%; }
   .outline { background: transparent; color: var(--text); border-color: var(--line); }
   .danger { background: transparent; color: var(--danger); border-color: var(--line); }
-  #list { display: grid; gap: 8px; }
+  #list, #devices { display: grid; gap: 8px; }
+  .empty { color: var(--muted); font-size: 14px; }
   .user { background: var(--panel); border-radius: var(--radius); padding: 16px; }
   .user .top { display: flex; align-items: baseline; gap: 8px; }
   .user .name { font-weight: 600; overflow-wrap: anywhere; }
@@ -68,6 +69,9 @@
 
   <section id="list" aria-live="polite"></section>
   <p id="message" role="alert"></p>
+
+  <h2>Підключені проектори</h2>
+  <section id="devices" aria-live="polite"></section>
 
   <h2>Новий користувач</h2>
   <form id="add">
@@ -160,8 +164,41 @@
     });
   }
 
+  function renderDevices(devices) {
+    var box = document.getElementById('devices');
+    box.textContent = '';
+    if (!devices.length) {
+      box.appendChild(el('div', 'empty', 'Жодного. Проектор підключається кодом зі сторінки /tv.'));
+      return;
+    }
+    devices.forEach(function (device) {
+      var card = el('div', 'user');
+      var top = el('div', 'top');
+      top.appendChild(el('span', 'name', device.name));
+      card.appendChild(top);
+      var when = new Date(device.created * 1000).toLocaleDateString('uk-UA');
+      card.appendChild(el('div', 'note', 'Підключив ' + device.approved_by + ', ' + when));
+      var actions = el('div', 'actions');
+      var remove = el('button', 'danger', 'Відключити');
+      remove.type = 'button';
+      remove.addEventListener('click', function () {
+        if (!confirm('Відключити цей проектор? Щоб повернути, доведеться знову ввести код.')) return;
+        message.textContent = '';
+        api('DELETE', '/api/devices/' + encodeURIComponent(device.id)).then(load).catch(fail);
+      });
+      actions.appendChild(remove);
+      card.appendChild(actions);
+      box.appendChild(card);
+    });
+  }
+
   function load() {
-    return api('GET', '/api/users').then(function (data) { render(data.users); }).catch(fail);
+    return Promise.all([api('GET', '/api/users'), api('GET', '/api/devices')])
+      .then(function (results) {
+        render(results[0].users);
+        renderDevices(results[1].devices);
+      })
+      .catch(fail);
   }
 
   form.addEventListener('submit', function (e) {
