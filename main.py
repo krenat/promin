@@ -1,11 +1,13 @@
 """Promin — домашній відеосервер для проектора.
 
-Етапи 1–3: список відео, завантаження, перекодування, перегляд і видалення.
-Пульт (етап 4) і вхід за токеном (етап 5) ще не додані.
+Список відео, завантаження, перекодування, перегляд, видалення і вхід за токеном.
+Пульт для проектора (етап 4) ще не доданий.
 """
 from __future__ import annotations
 
 import asyncio
+import hmac
+import html
 import json
 import logging
 import os
@@ -18,11 +20,11 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote
 
 import anyio
-from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
@@ -33,6 +35,12 @@ MB = 1024 * 1024
 
 ALLOWED_EXT = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".3gp"}
 PUBLIC_KEYS = ("id", "name", "size", "status", "created", "duration", "thumb", "error")
+
+COOKIE_NAME = "promin_session"
+COOKIE_MAX_AGE = 365 * 24 * 3600
+MIN_TOKEN_LENGTH = 12
+LOGIN_MAX_FAILURES = 5
+LOGIN_WINDOW_SECONDS = 15 * 60
 
 # Межі, у які має вписатися готове відео.
 MAX_WIDTH = 1920
@@ -55,6 +63,7 @@ HDR_FILTER_SWSCALE = (
 @dataclass
 class Settings:
     data_dir: Path
+    token: str = ""
     port: int = 8080
     max_upload_bytes: int = 4096 * MB
     # Скільки вільного місця має лишитися на диску після завантаження.
@@ -67,6 +76,7 @@ class Settings:
         env = os.environ
         return cls(
             data_dir=Path(env.get("PROMIN_DATA_DIR", "./data")).resolve(),
+            token=env.get("PROMIN_TOKEN", "").strip(),
             port=int(env.get("PROMIN_PORT", "8080")),
             max_upload_bytes=int(env.get("PROMIN_MAX_UPLOAD_MB", "4096")) * MB,
             max_bitrate_kbps=int(env.get("PROMIN_MAX_BITRATE_KBPS", "8000")),
@@ -405,7 +415,10 @@ class Transcoder:
             "-show_format", "-show_streams", str(src),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        out, err = await proc.communicate()
+        try:
+            out, err = await proc.communicate()
+        finally:
+            await self._reap(proc)
         if proc.returncode != 0:
             detail = " ".join(err.decode(errors="replace").split())
             raise ProcessingError("Файл не вдалося прочитати як відео (%s)" % detail)
@@ -418,15 +431,26 @@ class Transcoder:
         self._current_proc = proc
         assert proc.stdout is not None and proc.stderr is not None
         err_task = asyncio.create_task(proc.stderr.read())
-        async for raw in proc.stdout:
-            key, _, value = raw.decode(errors="replace").strip().partition("=")
-            # out_time_ms у ffmpeg теж у мікросекундах — історична особливість.
-            if key in ("out_time_us", "out_time_ms") and duration > 0:
-                with suppress(ValueError):
-                    done = int(value) / 1_000_000 / duration
-                    self.progress[video_id] = max(0.0, min(done, 1.0))
-        code = await proc.wait()
-        return code, (await err_task).decode(errors="replace")
+        try:
+            async for raw in proc.stdout:
+                key, _, value = raw.decode(errors="replace").strip().partition("=")
+                # out_time_ms у ffmpeg теж у мікросекундах — історична особливість.
+                if key in ("out_time_us", "out_time_ms") and duration > 0:
+                    with suppress(ValueError):
+                        done = int(value) / 1_000_000 / duration
+                        self.progress[video_id] = max(0.0, min(done, 1.0))
+            code = await proc.wait()
+            return code, (await err_task).decode(errors="replace")
+        finally:
+            err_task.cancel()
+            await self._reap(proc)
+
+    @staticmethod
+    async def _reap(proc: asyncio.subprocess.Process) -> None:
+        """Не лишає процес працювати, якщо обробку перервали."""
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
 
     async def _thumbnail(self, video: Path, video_id: str, duration: float) -> bool:
         out = self.settings.thumbs_dir / (video_id + ".jpg")
@@ -436,8 +460,49 @@ class Transcoder:
             "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "5", str(out),
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
-        await proc.wait()
+        try:
+            await proc.wait()
+        finally:
+            await self._reap(proc)
         return proc.returncode == 0 and out.is_file()
+
+
+# ------------------------------------------------------------------------- вхід
+
+
+class NotAuthenticated(Exception):
+    pass
+
+
+class LoginLimiter:
+    """Обмежує кількість невдалих спроб входу з однієї адреси."""
+
+    def __init__(self, max_failures: int = LOGIN_MAX_FAILURES, window: float = LOGIN_WINDOW_SECONDS) -> None:
+        self.max_failures = max_failures
+        self.window = window
+        self._failures: Dict[str, List[float]] = {}
+
+    def _recent(self, ip: str) -> List[float]:
+        cutoff = time.monotonic() - self.window
+        recent = [t for t in self._failures.get(ip, []) if t > cutoff]
+        if recent:
+            self._failures[ip] = recent
+        else:
+            self._failures.pop(ip, None)
+        return recent
+
+    def blocked(self, ip: str) -> bool:
+        return len(self._recent(ip)) >= self.max_failures
+
+    def fail(self, ip: str) -> None:
+        self._failures.setdefault(ip, []).append(time.monotonic())
+
+    def reset(self, ip: str) -> None:
+        self._failures.pop(ip, None)
+
+
+def same(a: str, b: str) -> bool:
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
 # ------------------------------------------------------------------- застосунок
@@ -457,6 +522,15 @@ def remove_files(settings: Settings, video_id: str) -> None:
 
 def create_app(settings: Optional[Settings] = None) -> FastAPI:
     settings = settings or Settings.from_env()
+    if len(settings.token) < MIN_TOKEN_LENGTH:
+        raise RuntimeError(
+            "Задайте PROMIN_TOKEN: щонайменше %d символів" % MIN_TOKEN_LENGTH
+        )
+    # У cookie лежить не сам токен, а похідне від нього значення.
+    session_value = hmac.new(
+        settings.token.encode("utf-8"), b"promin-session", "sha256"
+    ).hexdigest()
+    limiter = LoginLimiter()
     store = Store(settings.data_dir / "videos.json")
     transcoder = Transcoder(settings, store)
 
@@ -480,17 +554,62 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.state.transcoder = transcoder
     app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
+    def is_authenticated(request: Request) -> bool:
+        return same(request.cookies.get(COOKIE_NAME, ""), session_value)
+
+    def require_auth(request: Request) -> None:
+        if not is_authenticated(request):
+            raise NotAuthenticated()
+
+    @app.exception_handler(NotAuthenticated)
+    async def not_authenticated(request: Request, exc: NotAuthenticated) -> Response:
+        if request.method == "GET" and not request.url.path.startswith("/api/"):
+            return RedirectResponse("/login", status_code=303)
+        return JSONResponse({"detail": "Потрібен вхід"}, status_code=401)
+
+    def login_page(error: str = "", status_code: int = 200) -> HTMLResponse:
+        page = (BASE_DIR / "templates" / "login.html").read_text(encoding="utf-8")
+        return HTMLResponse(page.replace("{{error}}", html.escape(error)), status_code)
+
+    @app.get("/login")
+    async def login_form(request: Request) -> Response:
+        if is_authenticated(request):
+            return RedirectResponse("/", status_code=303)
+        return login_page()
+
+    @app.post("/login")
+    async def login(request: Request) -> Response:
+        ip = request.client.host if request.client else "unknown"
+        if limiter.blocked(ip):
+            return login_page("Забагато спроб. Спробуйте знову за 15 хвилин.", 429)
+        if int(request.headers.get("content-length") or 0) > 4096:
+            return login_page("Токен задовгий.", 413)
+        form = parse_qs((await request.body()).decode("utf-8", errors="replace"))
+        token = (form.get("token") or [""])[0].strip()
+        if not same(token, settings.token):
+            limiter.fail(ip)
+            return login_page("Неправильний токен.", 401)
+        limiter.reset(ip)
+        response = RedirectResponse("/", status_code=303)
+        response.set_cookie(
+            COOKIE_NAME, session_value, max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax"
+        )
+        return response
+
+    # Усе нижче доступне лише після входу, включно з відеофайлами.
+    router = APIRouter(dependencies=[Depends(require_auth)])
+
     def public(item: Dict[str, Any]) -> Dict[str, Any]:
         data = {key: item.get(key) for key in PUBLIC_KEYS}
         if item["status"] == "processing":
             data["progress"] = transcoder.progress.get(item["id"], 0.0)
         return data
 
-    @app.get("/", response_class=HTMLResponse)
+    @router.get("/", response_class=HTMLResponse)
     async def index() -> str:
         return (BASE_DIR / "templates" / "index.html").read_text(encoding="utf-8")
 
-    @app.get("/api/videos")
+    @router.get("/api/videos")
     async def list_videos() -> Dict[str, Any]:
         usage = shutil.disk_usage(settings.data_dir)
         return {
@@ -499,7 +618,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             "max_upload": settings.max_upload_bytes,
         }
 
-    @app.post("/api/videos", status_code=201)
+    @router.post("/api/videos", status_code=201)
     async def upload_video(request: Request) -> Dict[str, Any]:
         name = clean_name(request.headers.get("x-filename", ""))
         ext = Path(name).suffix.lower()
@@ -556,7 +675,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         transcoder.enqueue(video_id)
         return public(item)
 
-    @app.post("/api/videos/{video_id}/retry")
+    @router.post("/api/videos/{video_id}/retry")
     async def retry_video(video_id: str) -> Dict[str, Any]:
         item = store.get(video_id)
         if not item:
@@ -569,7 +688,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         transcoder.enqueue(video_id)
         return public(store.get(video_id) or item)
 
-    @app.get("/media/{video_id}")
+    @router.get("/media/{video_id}")
     async def media(video_id: str) -> FileResponse:
         item = store.get(video_id)
         path = settings.videos_dir / (video_id + ".mp4")
@@ -578,7 +697,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         # FileResponse сам обробляє Range-запити, потрібні для перемотування.
         return FileResponse(path, media_type="video/mp4")
 
-    @app.get("/thumb/{video_id}")
+    @router.get("/thumb/{video_id}")
     async def thumb(video_id: str) -> FileResponse:
         item = store.get(video_id)
         path = settings.thumbs_dir / (video_id + ".jpg")
@@ -588,7 +707,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             path, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"}
         )
 
-    @app.delete("/api/videos/{video_id}", status_code=204)
+    @router.delete("/api/videos/{video_id}", status_code=204)
     async def delete_video(video_id: str) -> Response:
         if not store.remove(video_id):
             raise HTTPException(404, "Відео не знайдено")
@@ -596,14 +715,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         remove_files(settings, video_id)
         return Response(status_code=204)
 
+    app.include_router(router)
     return app
 
-
-app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    app = create_app()
     # Один процес: черга і стан пульта живуть у пам'яті.
     uvicorn.run(app, host="0.0.0.0", port=app.state.settings.port)

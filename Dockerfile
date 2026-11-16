@@ -1,0 +1,24 @@
+FROM python:3.12-slim
+
+# ffmpeg з Debian зібрано з libzimg, потрібним для HDR → SDR.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg \
+ && rm -rf /var/lib/apt/lists/*
+
+# Сервіс працює не від root; дані лежать у /data.
+RUN useradd --create-home --uid 1000 promin \
+ && mkdir /data \
+ && chown promin:promin /data
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY main.py ./
+COPY templates ./templates
+COPY static ./static
+
+USER promin
+ENV PROMIN_DATA_DIR=/data \
+    PYTHONUNBUFFERED=1
+VOLUME /data
+CMD ["python", "main.py"]

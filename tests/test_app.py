@@ -21,6 +21,7 @@ from main import (  # noqa: E402
     plan_encode,
 )
 
+TOKEN = "test-token-1234567890"
 FFMPEG = shutil.which("ffmpeg")
 needs_ffmpeg = pytest.mark.skipif(FFMPEG is None, reason="потрібен ffmpeg")
 
@@ -49,9 +50,17 @@ def big_clip(tmp_path_factory) -> bytes:
     return make_clip(tmp_path_factory.mktemp("clips") / "big.mp4", size="2560x1440")
 
 
-def make_client(tmp_path: Path, **overrides) -> TestClient:
-    settings = Settings(data_dir=tmp_path, disk_reserve_bytes=0, **overrides)
-    return TestClient(create_app(settings))
+def make_client(tmp_path: Path, login: bool = True, **overrides) -> TestClient:
+    overrides.setdefault("disk_reserve_bytes", 0)
+    settings = Settings(data_dir=tmp_path, token=TOKEN, **overrides)
+    client = TestClient(create_app(settings))
+    if login:
+        # Cookie, яку сервер видає після входу, однакова для того самого токена.
+        with TestClient(create_app(settings), follow_redirects=False) as tmp:
+            r = tmp.post("/login", data={"token": TOKEN})
+            assert r.status_code == 303
+            client.cookies.set("promin_session", r.cookies["promin_session"])
+    return client
 
 
 @pytest.fixture
@@ -101,7 +110,7 @@ def fake_probe(**video) -> dict:
     }
 
 
-SETTINGS = Settings(data_dir=Path("."))
+SETTINGS = Settings(data_dir=Path("."), token=TOKEN)
 
 
 def test_plain_h264_is_remuxed():
@@ -297,10 +306,82 @@ def test_rejects_too_large_file(tmp_path):
 
 
 def test_rejects_when_disk_is_full(tmp_path):
-    settings = Settings(data_dir=tmp_path, disk_reserve_bytes=10**18)
-    with TestClient(create_app(settings)) as c:
+    with make_client(tmp_path, disk_reserve_bytes=10**18) as c:
         assert upload(c, b"x" * 100).status_code == 507
 
 
 def test_delete_unknown_video(client):
     assert client.delete("/api/videos/nope").status_code == 404
+
+
+# -------------------------------------------------------------------------- вхід
+
+
+@pytest.fixture
+def anon(tmp_path: Path):
+    with make_client(tmp_path, login=False) as c:
+        c.follow_redirects = False
+        yield c
+
+
+def test_app_refuses_to_start_without_token(tmp_path):
+    with pytest.raises(RuntimeError):
+        create_app(Settings(data_dir=tmp_path, token=""))
+    with pytest.raises(RuntimeError):
+        create_app(Settings(data_dir=tmp_path, token="short"))
+
+
+def test_pages_redirect_to_login(anon):
+    for path in ("/", "/media/abc", "/thumb/abc"):
+        r = anon.get(path)
+        assert r.status_code == 303, path
+        assert r.headers["location"] == "/login"
+
+
+def test_api_requires_login(anon, tmp_path):
+    assert anon.get("/api/videos").status_code == 401
+    assert anon.delete("/api/videos/abc").status_code == 401
+    assert anon.post("/api/videos/abc/retry").status_code == 401
+    assert upload(anon, b"x" * 100).status_code == 401
+    assert list((tmp_path / "uploads").iterdir()) == []
+
+
+def test_login_page_and_logo_are_public(anon):
+    r = anon.get("/login")
+    assert r.status_code == 200
+    assert 'name="token"' in r.text
+    assert anon.get("/static/logo.svg").status_code == 200
+
+
+def test_login_sets_long_lived_http_only_cookie(anon):
+    r = anon.post("/login", data={"token": TOKEN})
+    assert r.status_code == 303
+    assert r.headers["location"] == "/"
+    cookie = r.headers["set-cookie"].lower()
+    assert "httponly" in cookie
+    assert "samesite=lax" in cookie
+    assert "max-age=31536000" in cookie
+    assert TOKEN not in r.headers["set-cookie"]
+    assert anon.get("/api/videos").status_code == 200
+    assert anon.get("/login").status_code == 303  # уже увійшли
+
+
+def test_wrong_token_is_rejected(anon):
+    r = anon.post("/login", data={"token": "wrong-token-000000000"})
+    assert r.status_code == 401
+    assert "Неправильний токен" in r.text
+    assert "set-cookie" not in r.headers
+    assert anon.get("/api/videos").status_code == 401
+
+
+def test_forged_cookie_is_rejected(anon):
+    anon.cookies.set("promin_session", "0" * 64)
+    assert anon.get("/api/videos").status_code == 401
+
+
+def test_login_attempts_are_limited(anon):
+    for _ in range(5):
+        assert anon.post("/login", data={"token": "wrong"}).status_code == 401
+    # Після п'яти невдач не пускає навіть правильний токен.
+    assert anon.post("/login", data={"token": TOKEN}).status_code == 429
+    assert anon.get("/api/videos").status_code == 401

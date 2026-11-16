@@ -352,6 +352,7 @@
   function refresh() {
     return fetch('/api/videos')
       .then(function (r) {
+        if (r.status === 401) { location.href = '/login'; throw new Error('login'); }
         if (!r.ok) throw new Error('status ' + r.status);
         return r.json();
       })
@@ -422,6 +423,8 @@
       done();
       if (xhr.status === 201) {
         refresh();
+      } else if (xhr.status === 401) {
+        location.href = '/login';
       } else {
         message.textContent = errorText(xhr.responseText, 'Не вдалося завантажити відео (помилка ' + xhr.status + ').');
       }
