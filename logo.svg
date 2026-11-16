@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="#FFC53D" role="img" aria-label="Promin">
+  <title>Promin</title>
+  <path d="M8 20.5c0-2.3 2.5-3.8 4.5-2.6l19 11.5c1.9 1.2 1.9 4 0 5.2l-19 11.5c-2 1.2-4.5-.3-4.5-2.6z"/>
+  <path d="M38 28 60 12v40L38 36z" opacity=".4"/>
+</svg>

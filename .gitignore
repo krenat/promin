@@ -1,0 +1,26 @@
+# Секрети й локальні налаштування
+.env
+.env.*
+!.env.example
+
+# Дані сервісу
+data/
+uploads/
+videos/
+thumbs/
+*.mp4
+*.mov
+*.mkv
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Система й редактори
+.DS_Store
+.idea/
+.vscode/
