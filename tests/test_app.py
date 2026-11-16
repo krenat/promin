@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -8,9 +12,41 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from main import Settings, create_app  # noqa: E402
+from main import (  # noqa: E402
+    HDR_FILTER_ZSCALE,
+    ProcessingError,
+    Settings,
+    build_ffmpeg_args,
+    create_app,
+    plan_encode,
+)
 
-PAYLOAD = bytes(range(256)) * 40  # 10 240 байтів
+FFMPEG = shutil.which("ffmpeg")
+needs_ffmpeg = pytest.mark.skipif(FFMPEG is None, reason="потрібен ffmpeg")
+
+
+def make_clip(path: Path, size: str = "320x240", extra: tuple = ()) -> bytes:
+    subprocess.run(
+        [
+            FFMPEG, "-v", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=%s:rate=30" % size,
+            "-f", "lavfi", "-i", "sine=frequency=440",
+            "-t", "1", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", *extra, str(path),
+        ],
+        check=True,
+    )
+    return path.read_bytes()
+
+
+@pytest.fixture(scope="session")
+def small_clip(tmp_path_factory) -> bytes:
+    return make_clip(tmp_path_factory.mktemp("clips") / "small.mp4")
+
+
+@pytest.fixture(scope="session")
+def big_clip(tmp_path_factory) -> bytes:
+    return make_clip(tmp_path_factory.mktemp("clips") / "big.mp4", size="2560x1440")
 
 
 def make_client(tmp_path: Path, **overrides) -> TestClient:
@@ -24,8 +60,107 @@ def client(tmp_path: Path):
         yield c
 
 
-def upload(client: TestClient, name: str = "clip.mp4", data: bytes = PAYLOAD):
+def upload(client: TestClient, data: bytes, name: str = "clip.mp4"):
     return client.post("/api/videos", content=data, headers={"X-Filename": name})
+
+
+def wait_done(client: TestClient, video_id: str, timeout: float = 60) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        videos = {v["id"]: v for v in client.get("/api/videos").json()["videos"]}
+        if videos[video_id]["status"] in ("ready", "error"):
+            return videos[video_id]
+        time.sleep(0.1)
+    raise AssertionError("обробка не завершилася за %s с" % timeout)
+
+
+def probe_video(path: Path) -> dict:
+    out = subprocess.run(
+        [
+            shutil.which("ffprobe"), "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name,pix_fmt,width,height",
+            "-of", "json", str(path),
+        ],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    return json.loads(out)["streams"][0]
+
+
+# ------------------------------------------------------------ рішення за ffprobe
+
+
+def fake_probe(**video) -> dict:
+    stream = {
+        "codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p",
+        "width": 1920, "height": 1080, "avg_frame_rate": "30/1", "bit_rate": "6000000",
+    }
+    stream.update(video)
+    return {
+        "streams": [stream, {"codec_type": "audio", "codec_name": "aac"}],
+        "format": {"duration": "12.5"},
+    }
+
+
+SETTINGS = Settings(data_dir=Path("."))
+
+
+def test_plain_h264_is_remuxed():
+    plan = plan_encode(fake_probe(), SETTINGS)
+    assert plan["mode"] == "remux"
+    assert plan["duration"] == 12.5
+
+
+@pytest.mark.parametrize(
+    "video",
+    [
+        {"codec_name": "hevc"},
+        {"pix_fmt": "yuv420p10le"},
+        {"color_transfer": "smpte2084"},
+        {"color_transfer": "arib-std-b67"},
+        {"width": 3840, "height": 2160},
+        {"width": 1080, "height": 1920},
+        {"avg_frame_rate": "120/1"},
+        {"bit_rate": "40000000"},
+        {"side_data_list": [{"rotation": -90}]},
+        {"tags": {"rotate": "90"}},
+    ],
+)
+def test_everything_else_is_transcoded(video):
+    assert plan_encode(fake_probe(**video), SETTINGS)["mode"] == "transcode"
+
+
+def test_non_aac_audio_is_transcoded():
+    probe = fake_probe()
+    probe["streams"][1]["codec_name"] = "opus"
+    assert plan_encode(probe, SETTINGS)["mode"] == "transcode"
+
+
+def test_file_without_video_is_rejected():
+    with pytest.raises(ProcessingError):
+        plan_encode({"streams": [{"codec_type": "audio", "codec_name": "aac"}]}, SETTINGS)
+
+
+def test_transcode_args_follow_the_plan():
+    plan = plan_encode(fake_probe(color_transfer="smpte2084", avg_frame_rate="240/1"), SETTINGS)
+    args = build_ffmpeg_args("ffmpeg", Path("in.mov"), Path("out.mp4"), plan, SETTINGS, HDR_FILTER_ZSCALE)
+    filters = args[args.index("-vf") + 1]
+    assert filters.startswith(HDR_FILTER_ZSCALE)
+    assert "fps=60" in filters
+    assert filters.endswith("format=yuv420p")
+    assert args[args.index("-maxrate") + 1] == "8000k"
+    assert "-force_key_frames" in args
+    assert args[args.index("-color_trc") + 1] == "bt709"
+
+
+def test_remux_args_copy_streams():
+    plan = plan_encode(fake_probe(), SETTINGS)
+    args = build_ffmpeg_args("ffmpeg", Path("in.mp4"), Path("out.mp4"), plan, SETTINGS, None)
+    assert args[args.index("-c") + 1] == "copy"
+    assert "-vf" not in args
+    assert "+faststart" in args
+
+
+# ---------------------------------------------------------------- сервіс цілком
 
 
 def test_index_page(client):
@@ -34,82 +169,138 @@ def test_index_page(client):
     assert "Promin" in r.text
 
 
-def test_upload_list_play_delete(client, tmp_path):
-    r = upload(client)
+@needs_ffmpeg
+def test_upload_process_play_delete(client, tmp_path, small_clip):
+    r = upload(client, small_clip, name="%D0%9C%D0%BE%D1%80%D0%B5.mov")
     assert r.status_code == 201
-    video = r.json()
-    assert video["name"] == "clip.mp4"
-    assert video["size"] == len(PAYLOAD)
-    assert video["status"] == "ready"
+    created = r.json()
+    assert created["name"] == "Море.mov"
+    assert created["status"] == "queued"
 
-    listing = client.get("/api/videos").json()
-    assert [v["id"] for v in listing["videos"]] == [video["id"]]
-    assert listing["disk"]["free"] > 0
+    video = wait_done(client, created["id"])
+    assert video["status"] == "ready", video["error"]
+    assert video["thumb"] is True
+    assert 0.9 < video["duration"] < 1.2
+
+    # Оригінал прибрано, готовий файл названий сервером.
+    assert list((tmp_path / "uploads").iterdir()) == []
+    ready = tmp_path / "videos" / (video["id"] + ".mp4")
+    assert [p.name for p in (tmp_path / "videos").iterdir()] == [ready.name]
+    data = ready.read_bytes()
 
     full = client.get("/media/" + video["id"])
     assert full.status_code == 200
-    assert full.content == PAYLOAD
     assert full.headers["content-type"] == "video/mp4"
+    assert full.content == data
+
+    part = client.get("/media/" + video["id"], headers={"Range": "bytes=100-199"})
+    assert part.status_code == 206
+    assert part.content == data[100:200]
+    assert part.headers["content-range"] == "bytes 100-199/%d" % len(data)
+
+    thumb = client.get("/thumb/" + video["id"])
+    assert thumb.status_code == 200
+    assert thumb.content[:2] == b"\xff\xd8"  # JPEG
 
     assert client.delete("/api/videos/" + video["id"]).status_code == 204
     assert client.get("/api/videos").json()["videos"] == []
     assert client.get("/media/" + video["id"]).status_code == 404
-    assert list((tmp_path / "videos").iterdir()) == []
-    assert list((tmp_path / "uploads").iterdir()) == []
+    assert client.get("/thumb/" + video["id"]).status_code == 404
+    for folder in ("uploads", "videos", "thumbs"):
+        assert list((tmp_path / folder).iterdir()) == []
 
 
-def test_range_request(client):
-    video = upload(client).json()
-    r = client.get("/media/" + video["id"], headers={"Range": "bytes=100-199"})
-    assert r.status_code == 206
-    assert r.content == PAYLOAD[100:200]
-    assert r.headers["content-range"] == "bytes 100-199/%d" % len(PAYLOAD)
+@needs_ffmpeg
+def test_large_video_is_scaled_down(client, tmp_path, big_clip):
+    created = upload(client, big_clip).json()
+    video = wait_done(client, created["id"])
+    assert video["status"] == "ready", video["error"]
+    info = probe_video(tmp_path / "videos" / (video["id"] + ".mp4"))
+    assert info["codec_name"] == "h264"
+    assert info["pix_fmt"] == "yuv420p"
+    assert (info["width"], info["height"]) == (1920, 1080)
 
 
-def test_file_on_disk_uses_server_generated_name(client, tmp_path):
-    r = upload(client, name="..%2F..%2Fevil.mp4")
+@needs_ffmpeg
+def test_broken_file_gets_error_and_can_be_retried(client, tmp_path):
+    created = upload(client, b"this is not a video" * 100).json()
+    video = wait_done(client, created["id"])
+    assert video["status"] == "error"
+    assert video["error"]
+    assert client.get("/media/" + video["id"]).status_code == 404
+    # Оригінал лишається, щоб можна було повторити.
+    assert len(list((tmp_path / "uploads").iterdir())) == 1
+
+    assert client.post("/api/videos/%s/retry" % video["id"]).status_code == 200
+    assert wait_done(client, video["id"])["status"] == "error"
+
+
+@needs_ffmpeg
+def test_retry_is_only_for_failed_videos(client, small_clip):
+    created = upload(client, small_clip).json()
+    wait_done(client, created["id"])
+    assert client.post("/api/videos/%s/retry" % created["id"]).status_code == 409
+    assert client.post("/api/videos/nope/retry").status_code == 404
+
+
+@needs_ffmpeg
+def test_delete_while_waiting_in_queue(client, tmp_path, big_clip, small_clip):
+    first = upload(client, big_clip).json()
+    second = upload(client, small_clip).json()
+    assert client.delete("/api/videos/" + second["id"]).status_code == 204
+    assert client.delete("/api/videos/" + first["id"]).status_code == 204
+    time.sleep(1.5)  # воркер має помітити видалення і прибрати за собою
+    assert client.get("/api/videos").json()["videos"] == []
+    for folder in ("uploads", "videos", "thumbs"):
+        assert list((tmp_path / folder).iterdir()) == []
+
+
+@needs_ffmpeg
+def test_unfinished_jobs_resume_after_restart(tmp_path, small_clip):
+    (tmp_path / "uploads").mkdir()
+    (tmp_path / "videos").mkdir()
+    (tmp_path / "uploads" / "abc.mp4").write_bytes(small_clip)
+    (tmp_path / "uploads" / "leftover.part").write_bytes(b"x")
+    (tmp_path / "videos" / "abc.tmp.mp4").write_bytes(b"half-written")
+    item = {
+        "id": "abc", "name": "clip.mp4", "size": len(small_clip), "status": "processing",
+        "created": 1.0, "source": "abc.mp4", "duration": None, "thumb": False, "error": None,
+    }
+    (tmp_path / "videos.json").write_text(json.dumps({"abc": item}), encoding="utf-8")
+
+    with make_client(tmp_path) as c:
+        assert not (tmp_path / "uploads" / "leftover.part").exists()
+        assert wait_done(c, "abc")["status"] == "ready"
+        assert not (tmp_path / "videos" / "abc.tmp.mp4").exists()
+
+
+def test_file_name_cannot_escape_data_dir(client, tmp_path):
+    r = upload(client, b"x" * 100, name="..%2F..%2Fevil.mp4")
     assert r.status_code == 201
-    video = r.json()
-    assert video["name"] == "evil.mp4"
-    files = [p.name for p in (tmp_path / "videos").iterdir()]
-    assert files == [video["id"] + ".mp4"]
-
-
-def test_cyrillic_name(client):
-    r = upload(client, name="%D0%9C%D0%BE%D1%80%D0%B5.mov")
-    assert r.status_code == 201
-    assert r.json()["name"] == "Море.mov"
+    assert r.json()["name"] == "evil.mp4"
+    stored = [p.name for p in (tmp_path / "uploads").iterdir()]
+    assert all(name.startswith(r.json()["id"]) for name in stored)
 
 
 def test_rejects_unsupported_type(client):
-    assert upload(client, name="notes.txt").status_code == 415
+    assert upload(client, b"hello", name="notes.txt").status_code == 415
 
 
 def test_rejects_empty_file(client):
-    assert upload(client, data=b"").status_code == 400
+    assert upload(client, b"").status_code == 400
 
 
 def test_rejects_too_large_file(tmp_path):
     with make_client(tmp_path, max_upload_bytes=1000) as c:
-        assert upload(c).status_code == 413
+        assert upload(c, b"x" * 2000).status_code == 413
         assert list((tmp_path / "uploads").iterdir()) == []
 
 
 def test_rejects_when_disk_is_full(tmp_path):
     settings = Settings(data_dir=tmp_path, disk_reserve_bytes=10**18)
     with TestClient(create_app(settings)) as c:
-        assert upload(c).status_code == 507
+        assert upload(c, b"x" * 100).status_code == 507
 
 
 def test_delete_unknown_video(client):
     assert client.delete("/api/videos/nope").status_code == 404
-
-
-def test_list_survives_restart_and_parts_are_cleaned(tmp_path):
-    with make_client(tmp_path) as c:
-        video = upload(c).json()
-    (tmp_path / "uploads" / "leftover.part").write_bytes(b"x")
-
-    with make_client(tmp_path) as c:
-        assert [v["id"] for v in c.get("/api/videos").json()["videos"]] == [video["id"]]
-        assert not (tmp_path / "uploads" / "leftover.part").exists()
