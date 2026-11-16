@@ -153,7 +153,8 @@ def test_transcode_args_follow_the_plan():
     plan = plan_encode(fake_probe(color_transfer="smpte2084", avg_frame_rate="240/1"), SETTINGS)
     args = build_ffmpeg_args("ffmpeg", Path("in.mov"), Path("out.mp4"), plan, SETTINGS, HDR_FILTER_ZSCALE)
     filters = args[args.index("-vf") + 1]
-    assert filters.startswith(HDR_FILTER_ZSCALE)
+    assert filters.startswith("scale=")
+    assert filters.index("scale=") < filters.index(HDR_FILTER_ZSCALE)
     assert "fps=60" in filters
     assert filters.endswith("format=yuv420p")
     assert args[args.index("-maxrate") + 1] == "8000k"
