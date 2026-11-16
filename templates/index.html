@@ -259,6 +259,51 @@
   }
   #player-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
   #player-close { padding: 0 16px; }
+
+  /* ---------- компактна сітка карток ---------- */
+  main { max-width: 1200px; }
+  #upload-btn, #progress, #pair { max-width: 560px; }
+  #list { gap: 12px; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  @media (min-width: 600px) {
+    #list { gap: 16px; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+  }
+  .empty { grid-column: 1 / -1; }
+  .card { position: relative; display: flex; flex-direction: column; }
+  button.thumb {
+    width: 100%; min-height: 0; padding: 0; border: 0; border-radius: 0;
+    color: var(--text); cursor: pointer;
+  }
+  button.thumb:disabled { opacity: 1; cursor: default; }
+  button.thumb:focus-visible { outline-offset: -2px; }
+  .thumb .play {
+    position: absolute; left: 50%; top: 50%;
+    width: 40px; height: 40px; margin: -20px 0 0 -20px;
+    display: grid; place-items: center;
+    border-radius: 50%; background: rgba(15, 17, 21, 0.6);
+    transition: background-color 150ms;
+  }
+  button.thumb:hover .play { background: rgba(15, 17, 21, 0.85); }
+  .thumb .play svg { width: 20px; height: 20px; fill: var(--text); margin-left: 2px; }
+  .duration { right: 6px; bottom: 6px; padding: 1px 6px; font-size: 12px; }
+  .card .body { flex: 1; display: flex; flex-direction: column; padding: 12px; }
+  .name {
+    flex: none; font-size: 14px; line-height: 1.3; min-height: 2.6em;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+  }
+  .meta { margin: 4px 0 12px; font-size: 12px; }
+  .card .track { margin: -4px 0 12px; }
+  .error-text {
+    margin: -4px 0 12px; font-size: 12px;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
+  }
+  .actions { margin-top: auto; }
+  .actions button { font-size: 14px; padding: 0 8px; }
+  details.menu { position: absolute; top: 4px; right: 4px; z-index: 1; }
+  details.menu summary {
+    width: 40px; height: 40px; margin: 0;
+    color: var(--text); background: rgba(15, 17, 21, 0.6);
+  }
+  details.menu .pop { right: 0; top: 44px; min-width: 140px; }
 </style>
 </head>
 <body>
@@ -422,25 +467,37 @@
     return fallback;
   }
 
+  function displayName(name) {
+    return name.replace(/\.[a-z0-9]{2,4}$/i, '');
+  }
+
   function renderCard(item) {
     var card = el('article', 'card');
+    var ready = item.status === 'ready';
 
-    var thumb = el('div', 'thumb');
+    // Мініатюра — це кнопка «дивитись тут».
+    var thumb = el('button', 'thumb');
+    thumb.type = 'button';
+    thumb.disabled = !ready;
+    thumb.setAttribute('aria-label', 'Дивитись тут: ' + item.name);
     var picture = el('img', item.thumb ? 'cover' : 'mark');
-    picture.src = item.thumb ? '/thumb/' + item.id : '/static/logo.svg';
+    picture.src = item.thumb ? '/thumb/' + item.id + '?v=' + (item.thumb_v || 1) : '/static/logo.svg';
     picture.alt = '';
+    picture.loading = 'lazy';
     thumb.appendChild(picture);
+    if (ready) {
+      var play = el('span', 'play');
+      play.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>';
+      thumb.appendChild(play);
+    }
     if (item.duration) thumb.appendChild(el('span', 'duration', formatDuration(item.duration)));
+    thumb.addEventListener('click', function () { openPlayer(item); });
     card.appendChild(thumb);
-
-    var body = el('div', 'body');
-    var titleRow = el('div', 'title-row');
-    titleRow.appendChild(el('div', 'name', item.name));
 
     if (isAdmin) {
       var menu = el('details', 'menu');
       var summary = el('summary', null, '⋯');
-      summary.setAttribute('aria-label', 'Меню відео');
+      summary.setAttribute('aria-label', 'Меню відео: ' + item.name);
       menu.appendChild(summary);
       var pop = el('div', 'pop');
       var del = el('button', null, 'Видалити');
@@ -451,10 +508,13 @@
       });
       pop.appendChild(del);
       menu.appendChild(pop);
-      titleRow.appendChild(menu);
+      card.appendChild(menu);
     }
-    body.appendChild(titleRow);
 
+    var body = el('div', 'body');
+    var name = el('div', 'name', displayName(item.name));
+    name.title = item.name;
+    body.appendChild(name);
     body.appendChild(el('div', 'meta', formatSize(item.size) + ' · ' + statusText(item)));
 
     if (item.status === 'processing') {
@@ -469,31 +529,22 @@
     }
 
     var actions = el('div', 'actions');
-    if (item.status === 'error' && !isAdmin) {
-      // Глядачу нічого запропонувати: повторити обробку може лише адміністратор.
-    } else if (item.status === 'error') {
+    if (ready) {
+      var cast = el('button', 'primary', 'На проектор');
+      cast.type = 'button';
+      cast.disabled = !canCast();
+      cast.addEventListener('click', function () {
+        document.body.classList.remove('remote-collapsed');
+        command('load', { video_id: item.id });
+      });
+      actions.appendChild(cast);
+    } else if (item.status === 'error' && isAdmin) {
       var again = el('button', 'outline', 'Повторити');
       again.type = 'button';
       again.addEventListener('click', function () { retry(item.id); });
       actions.appendChild(again);
-    } else {
-      if (item.status === 'ready') {
-        var cast = el('button', 'primary', 'На проектор');
-        cast.type = 'button';
-        cast.disabled = !canCast();
-        cast.addEventListener('click', function () {
-          document.body.classList.remove('remote-collapsed');
-          command('load', { video_id: item.id });
-        });
-        actions.appendChild(cast);
-      }
-      var watch = el('button', 'outline', 'Дивитись тут');
-      watch.type = 'button';
-      watch.disabled = item.status !== 'ready';
-      watch.addEventListener('click', function () { openPlayer(item); });
-      actions.appendChild(watch);
     }
-    body.appendChild(actions);
+    if (actions.childNodes.length) body.appendChild(actions);
 
     card.appendChild(body);
     return card;

@@ -19,6 +19,7 @@ from main import (  # noqa: E402
     build_ffmpeg_args,
     create_app,
     plan_encode,
+    thumbnail_args,
 )
 
 TOKEN = "test-token-1234567890"
@@ -806,3 +807,55 @@ def test_devices_survive_restart(tmp_path):
     with make_client(tmp_path, login=False) as c:
         c.cookies.set("promin_session", cookie)
         assert c.get("/api/me").json()["role"] == "device"
+
+
+# -------------------------------------------------------------------- мініатюри
+
+
+def test_thumbnail_is_taken_away_from_the_start_of_long_videos():
+    args = thumbnail_args("ffmpeg", Path("in.mp4"), Path("out.jpg"), 1600.0)
+    assert args[args.index("-ss") + 1] == "160.00"
+    assert args[args.index("-vf") + 1].startswith("thumbnail=")
+    short = thumbnail_args("ffmpeg", Path("in.mp4"), Path("out.jpg"), 4.0)
+    assert short[short.index("-ss") + 1] == "1.00"
+    assert "thumbnail=" not in short[short.index("-vf") + 1]
+
+
+@needs_ffmpeg
+def test_long_video_gets_a_thumbnail(client, tmp_path, tmp_path_factory):
+    clip = tmp_path_factory.mktemp("long") / "long.mp4"
+    subprocess.run(
+        [
+            FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25",
+            "-t", "25", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(clip),
+        ],
+        check=True,
+    )
+    video = wait_done(client, upload(client, clip.read_bytes()).json()["id"])
+    assert video["status"] == "ready", video["error"]
+    assert video["thumb"] is True and video["thumb_v"] == 2
+    assert client.get("/thumb/" + video["id"]).content[:2] == b"\xff\xd8"
+    assert not list((tmp_path / "thumbs").glob("*.tmp.jpg"))
+
+
+@needs_ffmpeg
+def test_old_thumbnails_are_remade_on_start(tmp_path, small_clip):
+    for folder in ("uploads", "videos", "thumbs"):
+        (tmp_path / folder).mkdir()
+    (tmp_path / "videos" / "abc.mp4").write_bytes(small_clip)
+    (tmp_path / "thumbs" / "abc.jpg").write_bytes(b"old black frame")
+    item = {
+        "id": "abc", "name": "clip.mp4", "size": len(small_clip), "status": "ready",
+        "created": 1.0, "source": "abc.mp4", "duration": 1.0, "thumb": True, "error": None,
+    }
+    (tmp_path / "videos.json").write_text(json.dumps({"abc": item}), encoding="utf-8")
+
+    with make_client(tmp_path) as c:
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            video = c.get("/api/videos").json()["videos"][0]
+            if video.get("thumb_v") == 2:
+                break
+            time.sleep(0.1)
+        assert video["thumb_v"] == 2 and video["thumb"] is True
+        assert c.get("/thumb/abc").content[:2] == b"\xff\xd8"
