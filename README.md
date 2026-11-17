@@ -20,7 +20,7 @@ The interface is in Ukrainian.
 - playback on the projector controlled from the phone over WebSocket;
 - folders, one level deep;
 - a shared watch queue: the projector plays the next video by itself;
-- users with roles, and projectors paired with a code instead of a password.
+- users with roles, and projectors paired with a QR code instead of a password.
 
 ## Stack
 
@@ -28,7 +28,7 @@ Python 3.12, FastAPI, Uvicorn, ffmpeg, Docker.
 
 ## Running locally
 
-You need Python 3.9+ and ffmpeg with ffprobe in `PATH`. For correct colours in HDR videos, ffmpeg has to be built with libzimg (the `zscale` filter), as it is in Debian and Ubuntu.
+You need Python 3.12 (the version in the Docker image; `requirements.txt` pins exact package versions) and ffmpeg with ffprobe in `PATH`. For correct colours in HDR videos, ffmpeg has to be built with libzimg (the `zscale` filter), as it is in Debian and Ubuntu.
 
 ```bash
 python3 -m venv .venv
@@ -36,7 +36,7 @@ python3 -m venv .venv
 PROMIN_TOKEN=local-dev-token-123 .venv/bin/python main.py
 ```
 
-The page opens at `http://localhost:8080`; the login is `admin` and the password is the value of `PROMIN_TOKEN`. Tests: `.venv/bin/python -m pytest`.
+The page opens at `http://localhost:8080`; the login is `admin` and the password is the value of `PROMIN_TOKEN`. Tests: `.venv/bin/python -m pytest`. GitHub Actions runs them on every pull request with the pinned versions.
 
 ## Running on a server with Docker
 
@@ -51,6 +51,7 @@ docker compose up -d --build
 - Logs: `docker compose logs -f`.
 - Updating: `git pull && docker compose up -d --build`. With the old `docker-compose` 1.29 this command fails with `KeyError: 'ContainerConfig'`; use `docker-compose build && docker-compose down && docker-compose up -d` instead (without `-v`, so the volume with the videos is not deleted).
 - The container does not run as root and is limited to `PROMIN_CPUS` cores.
+- Behind a reverse proxy that adds HTTPS, set `FORWARDED_ALLOW_IPS` (see `.env.example`): without it every visitor looks like the proxy, and the login limit blocks everyone at once.
 
 ## Configuration
 
@@ -73,14 +74,23 @@ Any user chooses how new videos are encoded on the `/settings` page: the largest
 - A transcoded video does not get a higher bitrate than its original had. For HEVC, AV1 and VP9 originals the ceiling is 1.8 times the original bitrate, because H.264 needs more bits for the same picture.
 - `PROMIN_MAX_BITRATE_KBPS` and `PROMIN_X264_PRESET` are the defaults until the settings are saved on the page.
 
+### Projector check
+
+The same page has a "check the projector" button that shows which of these settings the projector can actually play. The projector must be on the `/tv` page, started, and not playing a video.
+
+- The server generates an 8-second H.264 clip for every resolution and frame rate (once, into `tvtest/` in the data directory), encoded at the bitrate the page suggests for that resolution.
+- The projector measures its download speed, then downloads each clip whole and plays it muted for 6 seconds. A clip counts as smooth when playback kept up with the clock and at most 5% of the frames were dropped. A harder clip is tried only after the easier one played smoothly.
+- The page shows the verdict for every clip, the measured speed, and the browser the projector reported, and warns when the chosen settings go past what the check found. Half of the measured speed is treated as the safe bitrate ceiling.
+- Some TV browsers do not count dropped frames; then only the clock is judged and the page says so. The check says what the browser can decode, not the native resolution of the picture.
+
 ## Projector and remote
 
-1. Open `/tv` in the projector's browser. A six-digit code appears on the screen: on the phone, tap the pair-projector link and enter it. There is no password to type on the projector, and it is remembered as a trusted device.
+1. Open `/tv` in the projector's browser. A QR code appears on the screen: point the phone's camera at it, open the link and confirm on the page that opens (after logging in, if the phone is not logged in yet). There is nothing to type on the projector, and it is remembered as a trusted device.
 2. Press the start button on the projector. This is needed once per session: without a press the browser does not allow playback with sound.
 3. Open `/` on the phone. The indicator in the header turns yellow when the projector is connected.
 4. Tap the cast button next to a video. A remote appears at the bottom: pause, seek by 10 seconds, a position slider, previous and next video, video volume, and a button that stops playback.
 
-- A code is valid for 10 minutes and works once. A paired projector can only show videos: it cannot upload, delete or change settings; the list of paired projectors is on the `/users` page, and an administrator can disconnect any of them.
+- A QR code is valid for 10 minutes and works once. Confirm only a code you scanned from your own projector: a pairing link sent by someone else would let their screen show your videos. A paired projector can only show videos: it cannot upload, delete, change settings or act as a remote; the list of paired projectors is on the `/users` page, and an administrator can disconnect any of them.
 - There is one projector: if `/tv` is opened on a second screen, playback moves there.
 - The projector page and the remote reconnect by themselves after a connection drop.
 - The volume on the remote is the video's volume; the page cannot change the projector's system volume.
@@ -90,7 +100,7 @@ Any user chooses how new videos are encoded on the `/settings` page: the largest
 
 - The queue button on a video card adds it to the end of the queue. The same video can be queued more than once.
 - The queue appears above the list: move entries up and down, remove them, clear the whole queue, or press play to start it on the projector.
-- When a video ends (or cannot be played), the projector starts the next one from the queue by itself. With an empty queue it stops, as before.
+- When a video ends, the projector starts the next one from the queue by itself. After a playback error (a network drop, usually) it first retries the same video from where it stopped, and moves on only after three failures in a row. With an empty queue it stops, as before.
 - The next button on the remote takes the queue first and falls back to the next video in the library.
 - There is one queue for the projector, shared by everyone. It survives a server restart, and deleted videos drop out of it.
 

@@ -53,6 +53,22 @@
   .buttons button { flex: 1; min-width: 160px; }
   #message { min-height: 24px; margin: 0; font-size: 14px; color: var(--text); }
   #message.error { color: var(--danger); }
+  .warn { color: var(--danger); }
+  section { margin-top: 48px; }
+  #check-status { min-height: 24px; margin: 16px 0 0; font-size: 14px; }
+  #check-status.error { color: var(--danger); }
+  #check-result { margin-top: 16px; font-size: 14px; }
+  #check-result p { margin: 0 0 8px; }
+  #check-result .fits { font-size: 16px; font-weight: 600; }
+  #check-result ul { list-style: none; margin: 16px 0; padding: 0; border-top: 1px solid var(--line); }
+  #check-result li {
+    display: flex; justify-content: space-between; gap: 16px;
+    padding: 12px 0; border-bottom: 1px solid var(--line);
+  }
+  #check-result li span:first-child { white-space: nowrap; }
+  #check-result li span:last-child { color: var(--muted); text-align: right; }
+  #check-result li.bad span:last-child { color: var(--danger); }
+  #check-result .small { color: var(--muted); overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
@@ -74,11 +90,13 @@
     <label>Найбільша частота кадрів
       <select name="max_fps"></select>
     </label>
+    <p class="hint warn" id="fit-hint" hidden></p>
 
     <label>Стеля бітрейту відео, кбіт/с
       <input name="max_bitrate_kbps" type="number" inputmode="numeric" step="500" required>
     </label>
     <p class="hint" id="bitrate-hint"></p>
+    <p class="hint warn" id="network-hint" hidden></p>
 
     <label>Якість (CRF)
       <input name="crf" type="number" inputmode="numeric" step="1" required>
@@ -100,6 +118,16 @@
       <button class="outline" type="button" id="reset" disabled>Повернути типові</button>
     </div>
   </form>
+
+  <section>
+    <h2>Перевірка проектора</h2>
+    <p class="lead">Проектор виміряє швидкість мережі та програє короткі тестові ролики кожної роздільності й частоти кадрів, а тут з'явиться, з чим він упорався. Це триває кілька хвилин; відео на проекторі має бути зупинене.</p>
+    <div class="buttons">
+      <button class="outline" type="button" id="check" disabled>Перевірити проектор</button>
+    </div>
+    <p id="check-status" role="status"></p>
+    <div id="check-result" hidden></div>
+  </section>
 </main>
 
 <script>
@@ -111,7 +139,8 @@
   var defaults = null;
   var HEIGHT_NAMES = { 720: '720p (HD)', 1080: '1080p (Full HD)', 1440: '1440p (2K)', 2160: '2160p (4K)' };
   // A sensible bitrate ceiling for each resolution, suggested when the resolution changes.
-  var SUGGESTED_KBPS = { 720: 4000, 1080: 8000, 1440: 16000, 2160: 30000 };
+  var SUGGESTED_KBPS = {};
+  var checked = null;   // the last finished projector check
   var PRESET_NAMES = {
     ultrafast: 'ultrafast — найшвидше, найгірша якість',
     superfast: 'superfast',
@@ -162,11 +191,41 @@
     document.getElementById('height-hint').hidden = height <= 1080;
     document.getElementById('bitrate-hint').textContent =
       'Для ' + HEIGHT_NAMES[height] + ' зазвичай вистачає ' + SUGGESTED_KBPS[height] + ' кбіт/с.';
+    updateWarnings();
+  }
+
+  // Says so when the chosen values go past what the projector managed in its last check.
+  function updateWarnings() {
+    var fit = document.getElementById('fit-hint');
+    var network = document.getElementById('network-hint');
+    fit.hidden = network.hidden = true;
+    if (!checked) return;
+    var id = form.max_height.value + 'p' + form.max_fps.value;
+    var clip = checked.clips.filter(function (c) { return c.id === id; })[0];
+    if (clip && clip.status !== 'ok') {
+      fit.textContent = 'Під час перевірки проектор ' + {
+        rough: 'відтворював таке відео з ривками.',
+        failed: 'не зміг відтворити таке відео.',
+        skipped: 'не впорався вже з легшим відео, тому таке не перевірялося.'
+      }[clip.status];
+      fit.hidden = false;
+    }
+    var limit = checked.fits.network_kbps;
+    if (limit && Number(form.max_bitrate_kbps.value) > limit) {
+      network.textContent = 'Це більше за половину швидкості мережі до проектора (' +
+        mbps(checked.speed_kbps) + '): відео може зупинятися. Безпечна стеля — ' + limit + ' кбіт/с.';
+      network.hidden = false;
+    }
+  }
+
+  function mbps(kbps) {
+    return (kbps / 1000).toFixed(kbps < 10000 ? 1 : 0).replace('.', ',') + ' Мбіт/с';
   }
 
   function build(data) {
     var choices = data.choices;
     defaults = data.defaults;
+    SUGGESTED_KBPS = data.suggested_kbps;
     fillSelect(form.max_height, choices.max_height, function (v) { return HEIGHT_NAMES[v] || v + 'p'; });
     fillSelect(form.max_fps, choices.max_fps, function (v) { return v + ' кадрів/с'; });
     fillSelect(form.audio_bitrate_kbps, choices.audio_bitrate_kbps, function (v) { return v + ' кбіт/с'; });
@@ -186,6 +245,8 @@
     form.max_bitrate_kbps.value = SUGGESTED_KBPS[Number(form.max_height.value)];
     updateHints();
   });
+  form.max_fps.addEventListener('change', updateWarnings);
+  form.max_bitrate_kbps.addEventListener('input', updateWarnings);
 
   reset.addEventListener('click', function () {
     show(defaults);
@@ -211,7 +272,115 @@
     }).then(function () { save.disabled = false; });
   });
 
-  api('GET').then(build).catch(function (error) {
+  // ------------------------------------------------------- projector check
+
+  var check = document.getElementById('check');
+  var checkStatus = document.getElementById('check-status');
+  var checkResult = document.getElementById('check-result');
+  var checkTimer = null;
+
+  function checkApi(method) {
+    return fetch('/api/tvtest', { method: method }).then(function (r) {
+      if (r.status === 401) { location.href = '/login'; throw new Error('login'); }
+      return r.json().catch(function () { return {}; }).then(function (data) {
+        if (r.ok) return data;
+        throw new Error(typeof data.detail === 'string' ? data.detail : 'Помилка ' + r.status);
+      });
+    });
+  }
+
+  function add(parent, tag, text, className) {
+    var node = document.createElement(tag);
+    node.textContent = text;
+    if (className) node.className = className;
+    parent.appendChild(node);
+    return node;
+  }
+
+  function verdict(clip) {
+    if (clip.status === 'ok') return 'плавно';
+    if (clip.status === 'skipped') return 'не перевірялося';
+    if (clip.status === 'failed') return clip.reason === 'download' ? 'ролик не завантажився' : 'не відтворюється';
+    var dropped = clip.frames ? Math.round(clip.dropped / clip.frames * 100) : 0;
+    if (dropped) return 'ривки: пропущено ' + dropped + '% кадрів';
+    return 'ривки: відстає від годинника на ' + Math.round((1 - clip.advance) * 100) + '%';
+  }
+
+  function showResult(result) {
+    checked = result;
+    checkResult.textContent = '';
+    checkResult.hidden = !result;
+    updateWarnings();
+    if (!result) return;
+    var fits = result.fits;
+    add(checkResult, 'p', fits.max_height
+      ? 'Плавно відтворює до ' + fits.max_height + 'p, ' + fits.max_fps + ' кадрів/с.'
+      : 'Жоден тестовий ролик не відтворився плавно.', 'fits');
+    var network = 'Швидкість мережі виміряти не вдалося.';
+    if (result.speed_kbps) {
+      // Half of the speed is left for everything else on the network.
+      network = 'Мережа до проектора: ' + mbps(result.speed_kbps) +
+        (fits.network_kbps >= Number(form.max_bitrate_kbps.max)
+          ? '. Цього досить для будь-якого бітрейту з налаштувань.'
+          : ', тож стеля бітрейту — щонайбільше ' + fits.network_kbps + ' кбіт/с.');
+    }
+    add(checkResult, 'p', network);
+    var list = add(checkResult, 'ul', '');
+    var counted = false;
+    var played = false;
+    result.clips.forEach(function (clip) {
+      var row = add(list, 'li', '', clip.status === 'rough' || clip.status === 'failed' ? 'bad' : '');
+      add(row, 'span', clip.height + 'p · ' + clip.fps + ' кадрів/с');
+      add(row, 'span', verdict(clip));
+      if (clip.frames) counted = true;
+      if (clip.status === 'ok' || clip.status === 'rough') played = true;
+    });
+    if (played && !counted) {
+      add(checkResult, 'p', 'Браузер проектора не повідомляє про пропущені кадри, тому плавність оцінено лише за тим, чи встигало відео за годинником. Дрібні ривки так не видно: під час перевірки дивіться й на сам екран.');
+    }
+    add(checkResult, 'p', 'Перевірка показує, з чим упорається браузер проектора, а не роздільність його зображення: вищу за неї ставити немає сенсу.');
+    var when = new Date(result.finished * 1000).toLocaleString('uk-UA', { dateStyle: 'long', timeStyle: 'short' });
+    var size = result.device.screen_width
+      ? ' Екран за даними браузера: ' + result.device.screen_width + '×' + result.device.screen_height + '.' : '';
+    add(checkResult, 'p', 'Перевірено ' + when + '.' + size + ' Браузер: ' + (result.device.agent || 'невідомий') + '.', 'small');
+  }
+
+  function showCheck(data) {
+    clearTimeout(checkTimer);
+    var busy = data.status !== 'idle';
+    check.disabled = busy;
+    checkStatus.className = !busy && data.error ? 'error' : '';
+    if (data.status === 'preparing') {
+      checkStatus.textContent = 'Сервер готує тестові ролики. Першого разу це може тривати кілька хвилин…';
+    } else if (data.status === 'running') {
+      checkStatus.textContent = data.step
+        ? 'Проектор відтворює тестові ролики: ' + data.step + ' з ' + data.steps + '…'
+        : 'Проектор вимірює швидкість мережі…';
+    } else {
+      checkStatus.textContent = data.error || '';
+    }
+    showResult(data.result);
+    if (busy) checkTimer = setTimeout(pollCheck, 2000);
+  }
+
+  function pollCheck() {
+    checkApi('GET').then(showCheck).catch(function (error) {
+      // A dropped connection is not the end of the check: ask again.
+      if (error.message !== 'login') checkTimer = setTimeout(pollCheck, 5000);
+    });
+  }
+
+  check.addEventListener('click', function () {
+    check.disabled = true;
+    checkApi('POST').then(showCheck).catch(function (error) {
+      if (error.message === 'login') return;
+      check.disabled = false;
+      checkStatus.className = 'error';
+      checkStatus.textContent = error.message;
+    });
+  });
+
+  api('GET').then(build).then(pollCheck).catch(function (error) {
     if (error.message !== 'login') say(error.message, true);
   });
 })();
