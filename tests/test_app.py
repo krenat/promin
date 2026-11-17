@@ -21,17 +21,21 @@ def test_app_refuses_to_start_without_token(tmp_path):
         create_app(Settings(data_dir=tmp_path, token="short"))
 
 
-def test_every_route_names_who_may_call_it(tmp_path):
+def test_every_route_names_who_may_call_it():
     """Routes are spread over modules, so one added without an access level would be open."""
     from fastapi.routing import APIRoute
 
+    from promin.routes import ROUTERS
     from promin.routes.deps import require_auth
 
     def guarded(dependant) -> bool:
         return dependant.call is require_auth or any(guarded(d) for d in dependant.dependencies)
 
-    app = create_app(Settings(data_dir=tmp_path, token=TOKEN))
-    open_routes = {r.path for r in app.routes if isinstance(r, APIRoute) and not guarded(r.dependant)}
+    # Read from the routers themselves: how an app keeps included routers differs between
+    # FastAPI versions.
+    routes = [r for router in ROUTERS for r in router.routes if isinstance(r, APIRoute)]
+    assert len(routes) > 30
+    open_routes = {r.path for r in routes if not guarded(r.dependant)}
     assert open_routes == {"/login", "/logout", "/tv", "/api/pair/start", "/api/pair/status"}
 
 
