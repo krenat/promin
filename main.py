@@ -204,7 +204,12 @@ def stream_rotation(stream: Dict[str, Any]) -> int:
 
 
 def plan_encode(probe: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
-    """За виводом ffprobe вирішує: перепакувати файл чи перекодувати."""
+    """За виводом ffprobe вирішує, скільки роботи потрібно.
+
+    remux — файл уже підходить, лише перепакувати;
+    audio — відео підходить, перекодувати тільки звук;
+    transcode — перекодувати все.
+    """
     streams = probe.get("streams") or []
     video = next(
         (
@@ -234,8 +239,8 @@ def plan_encode(probe: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     bitrate = number(video.get("bit_rate"), fmt.get("bit_rate"))
     hdr = video.get("color_transfer") in HDR_TRANSFERS
 
-    # Перепаковуємо лише те, що проектор точно зіграє як є.
-    remux = (
+    # Відео не чіпаємо лише тоді, коли проектор точно зіграє його як є.
+    video_ok = (
         video.get("codec_name") == "h264"
         and video.get("pix_fmt") == "yuv420p"
         and not hdr
@@ -244,10 +249,19 @@ def plan_encode(probe: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         and 0 < int(video.get("height") or 0) <= MAX_HEIGHT
         and 0 < fps <= MAX_FPS + 0.5
         and 0 < bitrate <= settings.max_bitrate_kbps * 1000 * 1.25
-        and (audio is None or audio.get("codec_name") == "aac")
     )
+    # Звук лишаємо як є, якщо це AAC моно або стерео.
+    audio_ok = audio is None or (
+        audio.get("codec_name") == "aac" and int(audio.get("channels") or 2) <= 2
+    )
+    if video_ok and audio_ok:
+        mode = "remux"
+    elif video_ok:
+        mode = "audio"
+    else:
+        mode = "transcode"
     return {
-        "mode": "remux" if remux else "transcode",
+        "mode": mode,
         "duration": duration,
         "fps": fps,
         "hdr": hdr,
@@ -266,6 +280,9 @@ def build_ffmpeg_args(
     args += ["-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn"]
     if plan["mode"] == "remux":
         args += ["-c", "copy"]
+    elif plan["mode"] == "audio":
+        # Картинка копіюється без втрат, перекодовується лише звук.
+        args += ["-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-ac", "2"]
     else:
         tonemapped = bool(plan["hdr"] and hdr_filter)
         # Вписати в 1920×1080 без збільшення; поворот ffmpeg застосовує сам.
