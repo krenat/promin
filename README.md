@@ -111,7 +111,7 @@ The same page has a "check the projector" button that shows which of these setti
 - A **viewer** watches, uploads and deletes videos, changes the encoding settings and controls the projector. An **administrator** can do all of that, also deletes several videos at once, and manages users and paired projectors.
 - The video library is shared by everyone.
 - Changing a password or deleting a user ends that user's sessions; changing `PROMIN_TOKEN` ends everyone's sessions.
-- Logging out revokes the session on the server. A session that has not been used for 30 days ends by itself.
+- Logging out revokes the session on the server. A session that has not been used for 30 days ends by itself, and so does the pairing of a projector that has not been in touch for 30 days: it drops out of the list and shows a QR code again. Using the service renews both.
 - After five failed login attempts from one address, login is blocked for 15 minutes; a successful login does not cancel earlier failures.
 
 ## How videos are processed
