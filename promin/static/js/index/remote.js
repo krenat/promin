@@ -32,6 +32,8 @@ function updateTv() {
   }
   document.getElementById('tv-text').textContent = text;
   document.getElementById('projector').className = 'projector' + (state.tvConnected ? ' on' : '');
+  // Only people with a login may send the projector away, as with every other command.
+  document.getElementById('tv-on').hidden = !(state.tvConnected && state.canManage);
   renderList();
   updateRemote();
   renderQueue();
@@ -135,6 +137,7 @@ document.getElementById('r-fwd').addEventListener('click', function () { command
 document.getElementById('r-prev').addEventListener('click', function () { step(-1); });
 document.getElementById('r-next').addEventListener('click', function () { step(1); });
 document.getElementById('r-stop').addEventListener('click', function () { command('stop'); });
+document.getElementById('tv-disconnect').addEventListener('click', function () { command('disconnect'); });
 document.getElementById('remote-toggle').addEventListener('click', function () {
   document.body.classList.toggle('remote-collapsed');
 });

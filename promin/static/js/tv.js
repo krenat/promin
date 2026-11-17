@@ -217,8 +217,13 @@
       ws = null;
       dropTest();  // the server gives up on a check when the connection drops
       if (event.code === 4401) { startPairing(); return; }
-      if (event.code === 4000) {
+      // Another screen took over (4000), or a phone disconnected this one (4001): either way
+      // this page stops being the projector until someone here asks for it again.
+      if (event.code === 4000 || event.code === 4001) {
         if (current) { video.pause(); }
+        document.getElementById('replaced-text').textContent = event.code === 4001
+          ? 'Цей екран від’єднали з телефона'
+          : 'Показ відкрито на іншому екрані';
         showScreen('replaced');
         document.getElementById('takeover-btn').focus();
         return;

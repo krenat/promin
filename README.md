@@ -124,6 +124,7 @@ The same page has a "check the projector" button that shows which of these setti
 
 - A QR code is valid for 10 minutes and works once. Confirm only a code you scanned from your own projector: a pairing link sent by someone else would let their screen show your videos. A paired projector can only show videos: it cannot upload, delete, change settings or act as a remote; the list of paired projectors is on the `/users` page, and an administrator can disconnect any of them.
 - There is one projector: if `/tv` is opened on a second screen, playback moves there.
+- Any screen with `/tv` open is the projector, a laptop included. To send the wrong one away, tap the projector indicator in the header of the phone page and press the disconnect button: that screen stops showing until someone there chooses to show again. A paired projector stays paired; unpairing is done on the `/users` page.
 - The projector page and the remote reconnect by themselves after a connection drop.
 - The volume on the remote is the video's volume; the page cannot change the projector's system volume.
 - Any logged-in user can control playback, viewers included.
