@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0F1115">
+<title>Налаштування — Promin</title>
+<link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/{{v}}/css/base.css">
+<link rel="stylesheet" href="/static/{{v}}/css/settings.css">
+</head>
+<body>
+<main>
+  <header>
+    <a class="back" href="/" aria-label="Назад до відео">←</a>
+    <h1>Налаштування</h1>
+  </header>
+
+  <h2>Кодування нових відео</h2>
+  <p class="lead">Діє для відео, які почнуть оброблятися після збереження. Готові відео не змінюються. Відео ніколи не збільшується: менша роздільність, частота кадрів чи бітрейт оригіналу лишаються як є.</p>
+
+  <form id="form">
+    <label>Найбільша роздільність
+      <select name="max_height"></select>
+    </label>
+    <p class="hint" id="height-hint" hidden>Понад 1080p варто вмикати, лише якщо браузер проектора відтворює таке відео без ривків.</p>
+
+    <label>Найбільша частота кадрів
+      <select name="max_fps"></select>
+    </label>
+    <p class="hint warn" id="fit-hint" hidden></p>
+
+    <label>Стеля бітрейту відео, кбіт/с
+      <input name="max_bitrate_kbps" type="number" inputmode="numeric" step="500" required>
+    </label>
+    <p class="hint" id="bitrate-hint"></p>
+    <p class="hint warn" id="network-hint" hidden></p>
+
+    <label>Якість (CRF)
+      <input name="crf" type="number" inputmode="numeric" step="1" required>
+    </label>
+    <p class="hint" id="crf-hint"></p>
+
+    <label>Бітрейт звуку
+      <select name="audio_bitrate_kbps"></select>
+    </label>
+
+    <label>Швидкість кодування
+      <select name="x264_preset"></select>
+    </label>
+    <p class="hint">Повільніші пресети дають кращу якість за того самого бітрейту, але обробка триває довше й сильніше вантажить процесор.</p>
+
+    <p id="message" role="status"></p>
+    <div class="buttons">
+      <button class="primary" type="submit" id="save" disabled>Зберегти</button>
+      <button class="outline" type="button" id="reset" disabled>Повернути типові</button>
+    </div>
+  </form>
+
+  <section>
+    <h2>Перевірка проектора</h2>
+    <p class="lead">Проектор виміряє швидкість мережі та програє короткі тестові ролики кожної роздільності й частоти кадрів, а тут з'явиться, з чим він упорався. Це триває кілька хвилин; відео на проекторі має бути зупинене.</p>
+    <div class="buttons">
+      <button class="outline" type="button" id="check" disabled>Перевірити проектор</button>
+    </div>
+    <p id="check-status" role="status"></p>
+    <div id="check-result" hidden></div>
+  </section>
+</main>
+
+<script type="module" src="/static/{{v}}/js/settings.js"></script>
+<script nomodule src="/static/{{v}}/js/nomodule.js"></script>
+</body>
+</html>

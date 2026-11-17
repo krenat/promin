@@ -1,0 +1,41 @@
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 400 16px/1.4 Manrope, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 560px; margin: 0 auto; padding: 16px 16px calc(32px + env(safe-area-inset-bottom)); }
+header { display: flex; align-items: center; gap: 8px; height: 48px; margin-bottom: 16px; }
+header a.back {
+  display: grid; place-items: center; width: 48px; height: 48px; margin-left: -12px;
+  color: var(--text); text-decoration: none; font-size: 24px; border-radius: 50%;
+}
+header h1 { margin: 0; font-size: 22px; font-weight: 700; }
+h2 { margin: 32px 0 16px; font-size: 16px; font-weight: 600; color: var(--muted); }
+button, input, select { font: inherit; }
+button {
+  font-weight: 600; min-height: 48px; padding: 0 16px; border-radius: var(--radius);
+  border: 1px solid transparent; cursor: pointer; transition: border-color 150ms, opacity 150ms;
+}
+button:disabled { opacity: 0.5; cursor: default; }
+button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.primary { background: var(--accent); color: var(--on-accent); width: 100%; }
+.outline { background: transparent; color: var(--text); border-color: var(--line); }
+.danger { background: transparent; color: var(--danger); border-color: var(--line); }
+#list, #devices { display: grid; gap: 8px; }
+.empty { color: var(--muted); font-size: 14px; }
+.user { background: var(--panel); border-radius: var(--radius); padding: 16px; }
+.user .top { display: flex; align-items: baseline; gap: 8px; }
+.user .name { font-weight: 600; overflow-wrap: anywhere; }
+.user .role { color: var(--muted); font-size: 14px; }
+.user .note { margin-top: 8px; color: var(--muted); font-size: 14px; }
+.user .actions { display: flex; gap: 8px; margin-top: 16px; }
+.user .actions button { flex: 1; }
+form { display: grid; gap: 16px; }
+label { display: grid; gap: 8px; color: var(--muted); font-size: 14px; }
+input, select {
+  width: 100%; height: 48px; padding: 0 16px; color: var(--text);
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.hint { margin: -8px 0 0; color: var(--muted); font-size: 14px; }
+#message { min-height: 24px; margin: 16px 0 0; color: var(--danger); font-size: 14px; }

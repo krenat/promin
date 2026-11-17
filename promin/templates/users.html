@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0F1115">
+<title>Користувачі — Promin</title>
+<link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/{{v}}/css/base.css">
+<link rel="stylesheet" href="/static/{{v}}/css/users.css">
+</head>
+<body>
+<main>
+  <header>
+    <a class="back" href="/" aria-label="Назад до відео">←</a>
+    <h1>Користувачі</h1>
+  </header>
+
+  <section id="list" aria-live="polite"></section>
+  <p id="message" role="alert"></p>
+
+  <h2>Підключені проектори</h2>
+  <section id="devices" aria-live="polite"></section>
+
+  <h2>Новий користувач</h2>
+  <form id="add">
+    <label>Логін
+      <input name="username" autocomplete="off" autocapitalize="none" autocorrect="off"
+             spellcheck="false" required minlength="2" maxlength="32" pattern="[a-z0-9][a-z0-9_\-]+">
+    </label>
+    <label>Пароль
+      <input name="password" type="text" autocomplete="off" autocapitalize="none" autocorrect="off"
+             spellcheck="false" required minlength="8" maxlength="200">
+    </label>
+    <p class="hint">Щонайменше 8 символів. Пароль видно, щоб ви могли передати його людині.</p>
+    <label>Роль
+      <select name="role">
+        <option value="viewer">Глядач: дивиться, додає й видаляє відео, керує проектором</option>
+        <option value="admin">Адміністратор: те саме, а ще керує користувачами й проекторами</option>
+      </select>
+    </label>
+    <button class="primary" type="submit">Додати користувача</button>
+  </form>
+</main>
+
+<script type="module" src="/static/{{v}}/js/users.js"></script>
+<script nomodule src="/static/{{v}}/js/nomodule.js"></script>
+</body>
+</html>

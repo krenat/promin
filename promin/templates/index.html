@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0F1115">
+<title>Promin</title>
+<link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/{{v}}/css/base.css">
+<link rel="stylesheet" href="/static/{{v}}/css/index.css">
+</head>
+<body>
+<main>
+  <header>
+    <img src="/static/logo.svg" alt="">
+    <h1>Promin</h1>
+    <button class="projector" id="projector" type="button" aria-controls="pair" aria-expanded="false">
+      <span class="dot"></span><span id="tv-text">Проектор не на зв'язку</span>
+    </button>
+  </header>
+
+  <section id="pair" hidden>
+    <p>Відкрийте на проекторі адресу <span id="pair-url"></span></p>
+    <p class="hint">На екрані з'явиться QR-код. Наведіть на нього камеру цього телефона, відкрийте посилання і підтвердьте підключення.</p>
+  </section>
+
+  <input id="file" type="file" accept="video/*" hidden>
+  <button id="upload-btn" class="primary" type="button" hidden>Завантажити відео</button>
+  <div id="progress" hidden>
+    <div class="progress-row"><span id="progress-name"></span><span id="progress-pct">0%</span></div>
+    <div class="track"><div class="bar" id="progress-bar"></div></div>
+  </div>
+  <p id="message" role="alert"></p>
+  <p id="disk" hidden></p>
+  <section id="queue" hidden aria-label="Черга перегляду">
+    <div class="queue-head">
+      <h2 id="queue-title">Черга</h2>
+      <button id="queue-play" class="primary" type="button">Грати</button>
+      <button id="queue-clear" class="outline" type="button">Очистити</button>
+    </div>
+    <ol id="queue-list"></ol>
+  </section>
+
+  <nav id="folders" aria-label="Теки" hidden></nav>
+  <div id="folder-tools" hidden>
+    <button id="folder-rename" class="outline" type="button">Перейменувати теку</button>
+    <button id="folder-delete" class="outline" type="button">Видалити теку</button>
+  </div>
+  <div id="select-bar" hidden>
+    <button id="select-start" class="outline" type="button">Вибрати кілька</button>
+    <span id="select-count" hidden></span>
+    <button id="select-all" class="outline" type="button" hidden>Усі</button>
+    <button id="select-delete" class="danger-btn" type="button" hidden disabled>Видалити</button>
+    <button id="select-cancel" class="outline" type="button" hidden>Скасувати</button>
+  </div>
+
+  <section id="list" aria-live="polite"></section>
+
+  <dialog id="move-dialog" aria-labelledby="move-title">
+    <h2 id="move-title"></h2>
+    <div id="move-options"></div>
+    <button id="move-cancel" class="outline" type="button">Скасувати</button>
+  </dialog>
+
+  <footer>
+    <span class="who" id="who"></span>
+    <a id="pair-link" href="#pair">Підключити проектор</a>
+    <a id="settings-link" href="/settings" hidden>Налаштування</a>
+    <a id="users-link" href="/users" hidden>Користувачі</a>
+    <form method="post" action="/logout"><button class="outline" type="submit">Вийти</button></form>
+  </footer>
+</main>
+
+<section id="remote" hidden aria-label="Пульт проектора">
+  <div class="inner">
+    <div class="remote-head">
+      <div id="remote-title"></div>
+      <button id="r-mini" class="icon-btn" type="button" aria-label="Пауза або відтворення">
+        <svg viewBox="0 0 24 24"><path id="r-mini-icon" d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+      </button>
+      <button id="remote-toggle" class="icon-btn" type="button" aria-label="Згорнути або розгорнути пульт">
+        <svg viewBox="0 0 24 24"><path d="M7.4 8.6 12 13.2l4.6-4.6L18 10l-6 6-6-6z"/></svg>
+      </button>
+    </div>
+    <div id="up-next" hidden></div>
+    <div class="remote-body">
+      <div class="seek">
+        <span id="r-pos">0:00</span>
+        <input id="r-seek" type="range" min="0" max="0" step="1" value="0" aria-label="Позиція у відео">
+        <span id="r-dur">0:00</span>
+      </div>
+      <div class="transport">
+        <button id="r-prev" class="round outline" type="button" aria-label="Попереднє відео">
+          <svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg>
+        </button>
+        <button id="r-back" class="round outline" type="button" aria-label="Назад на 10 секунд">−10</button>
+        <button id="r-play" class="round big" type="button" aria-label="Пауза або відтворення">
+          <svg viewBox="0 0 24 24"><path id="r-play-icon" d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+        </button>
+        <button id="r-fwd" class="round outline" type="button" aria-label="Вперед на 10 секунд">+10</button>
+        <button id="r-next" class="round outline" type="button" aria-label="Наступне відео">
+          <svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5l11 7L4 19z"/></svg>
+        </button>
+      </div>
+      <div class="volume">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9zm11.5 3a4 4 0 0 0-2-3.5v7a4 4 0 0 0 2-3.5z"/></svg>
+        <input id="r-vol" type="range" min="0" max="100" step="1" value="100" aria-label="Гучність відео">
+      </div>
+      <button id="r-stop" class="outline" type="button">Зупинити показ</button>
+    </div>
+  </div>
+</section>
+
+<div id="player" hidden>
+  <div class="bar-top">
+    <div class="player-head">
+      <span id="player-title"></span>
+      <span id="player-info"></span>
+    </div>
+    <button id="player-close" class="outline" type="button">Закрити</button>
+  </div>
+  <video id="video" controls playsinline></video>
+</div>
+
+<script type="module" src="/static/{{v}}/js/index/main.js"></script>
+<script nomodule src="/static/{{v}}/js/nomodule.js"></script>
+</body>
+</html>
