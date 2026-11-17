@@ -52,6 +52,7 @@ COOKIE_MAX_AGE = 365 * 24 * 3600
 SESSION_IDLE_TTL = 30 * 24 * 3600
 SESSION_TOUCH_EVERY = 24 * 3600  # how often to record that a session was used
 LOGIN_MAX_BODY = 4096
+BATCH_DELETE_MAX = 500
 MIN_TOKEN_LENGTH = 12
 
 # Where login may redirect to, and which commands the remote may send to the projector.
@@ -925,6 +926,10 @@ class NewPassword(BaseModel):
     password: str
 
 
+class VideoIds(BaseModel):
+    ids: List[str]
+
+
 class EncodingBody(BaseModel):
     max_height: int
     max_fps: int
@@ -1448,13 +1453,31 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             path, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"}
         )
 
-    @member.delete("/api/videos/{video_id}", status_code=204)
-    async def delete_video(video_id: str) -> Response:
+    def delete_one(video_id: str) -> bool:
+        # Files are touched only for an id the store knew, so an id never reaches the glob raw.
         if not store.remove(video_id):
-            raise HTTPException(404, "Відео не знайдено")
+            return False
         transcoder.cancel(video_id)
         remove_files(settings, video_id)
+        return True
+
+    @member.delete("/api/videos/{video_id}", status_code=204)
+    async def delete_video(video_id: str) -> Response:
+        if not delete_one(video_id):
+            raise HTTPException(404, "Відео не знайдено")
         return Response(status_code=204)
+
+    @admin.post("/api/videos/delete")
+    async def delete_videos(body: VideoIds) -> Dict[str, Any]:
+        """Deletes several videos at once. Ids that are already gone are reported, not an error."""
+        ids = list(dict.fromkeys(body.ids))  # without repeats, in the given order
+        if not ids:
+            raise HTTPException(400, "Не вибрано жодного відео")
+        if len(ids) > BATCH_DELETE_MAX:
+            raise HTTPException(400, "За раз можна видалити щонайбільше %d відео" % BATCH_DELETE_MAX)
+        deleted = [video_id for video_id in ids if delete_one(video_id)]
+        gone = set(deleted)
+        return {"deleted": deleted, "missing": [i for i in ids if i not in gone]}
 
     @app.websocket("/ws")
     async def websocket(ws: WebSocket) -> None:

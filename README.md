@@ -80,7 +80,7 @@ Any user chooses how new videos are encoded on the `/settings` page: the largest
 
 - The built-in administrator has the login `admin`; its password is the value of `PROMIN_TOKEN`.
 - The administrator adds other users on the `/users` page. Their passwords are stored in the data volume only as hashes.
-- A **viewer** watches, uploads and deletes videos, changes the encoding settings and controls the projector. An **administrator** can do all of that and also manages users and paired projectors.
+- A **viewer** watches, uploads and deletes videos, changes the encoding settings and controls the projector. An **administrator** can do all of that, also deletes several videos at once, and manages users and paired projectors.
 - The video library is shared by everyone.
 - Changing a password or deleting a user ends that user's sessions; changing `PROMIN_TOKEN` ends everyone's sessions.
 - Logging out revokes the session on the server. A session that has not been used for 30 days ends by itself.
