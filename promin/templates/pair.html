@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0F1115">
+<title>Підключення проектора — Promin</title>
+<link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/{{v}}/css/base.css">
+<link rel="stylesheet" href="/static/{{v}}/css/pair.css">
+</head>
+<body>
+<main>
+  <div class="brand">
+    <img src="/static/logo.svg" alt="">
+    <span>Promin</span>
+  </div>
+
+  <section id="ask">
+    <h1>Підключити проектор?</h1>
+    <p>Він зможе показувати відео з бібліотеки. Підтверджуйте, лише якщо ви щойно зчитали цей код з екрана свого проектора, а не отримали посилання від когось.</p>
+    <button id="approve" type="button">Підключити</button>
+    <a class="button quiet" href="/">Скасувати</a>
+    <p class="error" id="error" role="alert"></p>
+  </section>
+
+  <section id="done" hidden>
+    <h1>Проектор підключено</h1>
+    <p>За кілька секунд на його екрані з'явиться кнопка «Почати».</p>
+    <a class="button" href="/">До відео</a>
+  </section>
+</main>
+<script src="/static/{{v}}/js/pair.js"></script>
+</body>
+</html>

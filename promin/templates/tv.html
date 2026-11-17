@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Promin — проектор</title>
+<link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/{{v}}/css/tv.css">
+</head>
+<body>
+<video id="video" playsinline></video>
+
+<div class="screen" id="pair">
+  <img src="/static/logo.svg" alt="">
+  <img id="pair-qr" alt="QR-код для підключення проектора">
+  <p id="pair-text">Наведіть камеру телефона на цей код і відкрийте посилання</p>
+  <a href="/login?next=/tv">Увійти з логіном і паролем</a>
+</div>
+
+<div class="screen" id="start">
+  <img src="/static/logo.svg" alt="">
+  <button id="start-btn" type="button" autofocus>Почати</button>
+  <p>Натисніть один раз, щоб дозволити відтворення зі звуком</p>
+</div>
+
+<div class="screen" id="waiting">
+  <img src="/static/logo.svg" alt="">
+  <p id="waiting-text">Оберіть відео на телефоні</p>
+</div>
+
+<div class="screen" id="replaced">
+  <img src="/static/logo.svg" alt="">
+  <p>Показ відкрито на іншому екрані</p>
+  <button id="takeover-btn" type="button">Показувати тут</button>
+</div>
+
+<div id="note"></div>
+
+<div id="bar">
+  <div id="bar-title"></div>
+  <div id="bar-track"><div id="bar-fill"></div></div>
+</div>
+
+<script src="/static/{{v}}/js/tv.js"></script>
+</body>
+</html>

@@ -14,8 +14,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY main.py ./
-COPY templates ./templates
-COPY static ./static
+COPY promin ./promin
 
 USER promin
 ENV PROMIN_DATA_DIR=/data \

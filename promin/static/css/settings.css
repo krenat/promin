@@ -1,0 +1,52 @@
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 400 16px/1.4 Manrope, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 560px; margin: 0 auto; padding: 16px 16px calc(32px + env(safe-area-inset-bottom)); }
+header { display: flex; align-items: center; gap: 8px; height: 48px; margin-bottom: 16px; }
+header a.back {
+  display: grid; place-items: center; width: 48px; height: 48px; margin-left: -12px;
+  color: var(--text); text-decoration: none; font-size: 24px; border-radius: 50%;
+}
+header h1 { margin: 0; font-size: 22px; font-weight: 700; }
+h2 { margin: 0 0 8px; font-size: 16px; font-weight: 600; color: var(--muted); }
+.lead { margin: 0 0 24px; color: var(--muted); font-size: 14px; }
+button, input, select { font: inherit; }
+button {
+  font-weight: 600; min-height: 48px; padding: 0 16px; border-radius: var(--radius);
+  border: 1px solid transparent; cursor: pointer; transition: border-color 150ms, opacity 150ms;
+}
+button:disabled { opacity: 0.5; cursor: default; }
+button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.primary { background: var(--accent); color: var(--on-accent); }
+.outline { background: transparent; color: var(--text); border-color: var(--line); }
+.outline:hover:not(:disabled) { border-color: var(--muted); }
+form { display: grid; gap: 16px; }
+label { display: grid; gap: 8px; color: var(--muted); font-size: 14px; }
+input, select {
+  width: 100%; height: 48px; padding: 0 16px; color: var(--text);
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.hint { margin: -8px 0 0; color: var(--muted); font-size: 14px; }
+.buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.buttons button { flex: 1; min-width: 160px; }
+#message { min-height: 24px; margin: 0; font-size: 14px; color: var(--text); }
+#message.error { color: var(--danger); }
+.warn { color: var(--danger); }
+section { margin-top: 48px; }
+#check-status { min-height: 24px; margin: 16px 0 0; font-size: 14px; }
+#check-status.error { color: var(--danger); }
+#check-result { margin-top: 16px; font-size: 14px; }
+#check-result p { margin: 0 0 8px; }
+#check-result .fits { font-size: 16px; font-weight: 600; }
+#check-result ul { list-style: none; margin: 16px 0; padding: 0; border-top: 1px solid var(--line); }
+#check-result li {
+  display: flex; justify-content: space-between; gap: 16px;
+  padding: 12px 0; border-bottom: 1px solid var(--line);
+}
+#check-result li span:first-child { white-space: nowrap; }
+#check-result li span:last-child { color: var(--muted); text-align: right; }
+#check-result li.bad span:last-child { color: var(--danger); }
+#check-result .small { color: var(--muted); overflow-wrap: anywhere; }
