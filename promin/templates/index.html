@@ -13,8 +13,26 @@
 <link rel="stylesheet" href="/static/{{v}}/css/index.css">
 </head>
 <body>
+<aside id="side" aria-label="Меню">
+  <div class="brand"><img src="/static/logo.svg" alt=""><span>Promin</span></div>
+  <button id="upload-btn" class="primary" type="button" hidden>Завантажити відео</button>
+  <p id="disk" hidden></p>
+  <nav>
+    <a id="pair-link" href="#pair">Підключити проектор</a>
+    <a id="settings-link" href="/settings" hidden>Налаштування</a>
+    <a id="users-link" href="/users" hidden>Користувачі</a>
+  </nav>
+  <div class="account">
+    <span class="who" id="who"></span>
+    <form method="post" action="/logout"><button class="outline" type="submit">Вийти</button></form>
+  </div>
+</aside>
+<div id="side-backdrop"></div>
 <main>
   <header>
+    <button id="menu-btn" class="icon-btn" type="button" aria-label="Меню" aria-controls="side" aria-expanded="false">
+      <svg viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </button>
     <img src="/static/logo.svg" alt="">
     <h1>Promin</h1>
     <button class="projector" id="projector" type="button" aria-controls="pair" aria-expanded="false">
@@ -25,16 +43,18 @@
   <section id="pair" hidden>
     <p>Відкрийте на проекторі адресу <span id="pair-url"></span></p>
     <p class="hint">На екрані з'явиться QR-код. Наведіть на нього камеру цього телефона, відкрийте посилання і підтвердьте підключення.</p>
+    <div id="tv-on" hidden>
+      <p class="hint">Проектором зараз є екран, на якому відкрито цю адресу. Якщо це не той екран, від'єднайте його: показ на ньому зупиниться, доки там не натиснуть «Показувати тут».</p>
+      <button id="tv-disconnect" class="outline" type="button">Від'єднати проектор</button>
+    </div>
   </section>
 
   <input id="file" type="file" accept="video/*" hidden>
-  <button id="upload-btn" class="primary" type="button" hidden>Завантажити відео</button>
   <div id="progress" hidden>
     <div class="progress-row"><span id="progress-name"></span><span id="progress-pct">0%</span></div>
     <div class="track"><div class="bar" id="progress-bar"></div></div>
   </div>
   <p id="message" role="alert"></p>
-  <p id="disk" hidden></p>
   <section id="queue" hidden aria-label="Черга перегляду">
     <div class="queue-head">
       <h2 id="queue-title">Черга</h2>
@@ -65,15 +85,9 @@
     <button id="move-cancel" class="outline" type="button">Скасувати</button>
   </dialog>
 
-  <footer>
-    <span class="who" id="who"></span>
-    <a id="pair-link" href="#pair">Підключити проектор</a>
-    <a id="settings-link" href="/settings" hidden>Налаштування</a>
-    <a id="users-link" href="/users" hidden>Користувачі</a>
-    <form method="post" action="/logout"><button class="outline" type="submit">Вийти</button></form>
-  </footer>
 </main>
 
+<div id="dock">
 <section id="remote" hidden aria-label="Пульт проектора">
   <div class="inner">
     <div class="remote-head">
@@ -113,6 +127,8 @@
     </div>
   </div>
 </section>
+
+</div>
 
 <div id="player" hidden>
   <div class="bar-top">

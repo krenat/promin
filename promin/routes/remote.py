@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Response, WebSocket, WebSocketDisconnect
 
-from ..hub import REMOTE_ACTIONS, WS_REPLACED, WS_UNAUTHORIZED, clean_state
+from ..hub import REMOTE_ACTIONS, WS_DISMISSED, WS_REPLACED, WS_UNAUTHORIZED, clean_state
 from ..services import Services
 from .deps import page, services
 
@@ -96,6 +96,21 @@ async def tv_message(svc: Services, message: Dict[str, Any]) -> None:
         svc.tvtest.report(message)
 
 
+async def dismiss_tv(svc: Services) -> None:
+    """Lets the projector go at a phone's request: whatever screen has /tv open stops being
+    the projector until someone there chooses to show again. A paired projector stays
+    paired; taking that away is done on the users page."""
+    hub, tvtest = svc.hub, svc.tvtest
+    tv, hub.tv, hub.state = hub.tv, None, None
+    if tv is None:
+        return
+    if tvtest.status == "running":
+        tvtest.fail("Проектор від'єднали під час перевірки")
+    with suppress(Exception):
+        await tv.close(code=WS_DISMISSED)
+    await hub.broadcast({"type": "tv", "connected": False})
+
+
 # -------------------------------------------------------------------- a remote
 
 
@@ -135,6 +150,9 @@ async def remote_command(svc: Services, message: Dict[str, Any]) -> str:
         return ""
     if hub.tv is None:
         return "Проектор не на зв'язку"
+    if action == "disconnect":
+        await dismiss_tv(svc)
+        return ""
     if action == "next":
         return "" if await svc.playback.play_next() else "Черга порожня"
     command: Dict[str, Any] = {"type": "command", "action": action}

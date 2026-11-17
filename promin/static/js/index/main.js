@@ -29,9 +29,35 @@ document.getElementById('pair-link').addEventListener('click', function (e) {
   togglePair(true);
 });
 
+// ------------------------------------------------- the side menu (a drawer on a phone)
+
+var side = document.getElementById('side');
+var menuBtn = document.getElementById('menu-btn');
+
+function toggleSide(open) {
+  document.body.classList.toggle('side-open', open);
+  menuBtn.setAttribute('aria-expanded', String(document.body.classList.contains('side-open')));
+}
+
+menuBtn.addEventListener('click', function () { toggleSide(); });
+document.getElementById('side-backdrop').addEventListener('click', function () { toggleSide(false); });
+// Anything chosen in the menu closes it, so that what it did is seen.
+side.addEventListener('click', function (e) {
+  if (e.target.closest('a, button')) toggleSide(false);
+});
+
+// The remote lies over the page: the list leaves it room.
+var dock = document.getElementById('dock');
+function fitDock() {
+  document.documentElement.style.setProperty('--dock-h', dock.offsetHeight + 'px');
+}
+if (typeof ResizeObserver === 'function') new ResizeObserver(fitDock).observe(dock);
+fitDock();
+
 document.addEventListener('keydown', function (e) {
   if (e.key !== 'Escape') return;
   if (!player.hidden) closePlayer();
+  else if (document.body.classList.contains('side-open')) toggleSide(false);
   else if (state.selecting) setSelecting(false);
 });
 document.addEventListener('click', function (e) {

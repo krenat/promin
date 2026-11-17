@@ -8,7 +8,7 @@ import { addToQueue } from './queue.js';
 import { canCast, command } from './remote.js';
 import { toggleSelected, updateSelectBar } from './selection.js';
 import { state } from './state.js';
-import { ICON_ADD, displayName, formatBitrate, formatDuration, formatSize, lastLine, message, qualityDetails, qualityLabel, statusText } from './ui.js';
+import { ICON_ADD, ICON_PLAY, displayName, formatBitrate, formatDuration, formatSize, lastLine, message, qualityDetails, qualityLabel, statusText } from './ui.js';
 
 export var disk = document.getElementById('disk');
 var list = document.getElementById('list');
@@ -35,7 +35,7 @@ function renderCard(item) {
   thumb.appendChild(picture);
   if (ready) {
     var play = el('span', 'play');
-    play.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>';
+    play.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="' + ICON_PLAY + '"/></svg>';
     thumb.appendChild(play);
   }
   if (item.duration) thumb.appendChild(el('span', 'duration', formatDuration(item.duration)));

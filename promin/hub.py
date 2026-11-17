@@ -9,8 +9,11 @@ from fastapi import WebSocket
 from .parsing import finite
 
 # Which commands the remote may send to the projector.
-REMOTE_ACTIONS = ("load", "play", "pause", "seek", "seek_by", "volume", "stop", "next")
+REMOTE_ACTIONS = (
+    "load", "play", "pause", "seek", "seek_by", "volume", "stop", "next", "disconnect",
+)
 WS_REPLACED = 4000  # the projector page was opened elsewhere
+WS_DISMISSED = 4001  # a phone disconnected the projector
 WS_UNAUTHORIZED = 4401
 
 

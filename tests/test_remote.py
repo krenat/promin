@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
-from helpers import needs_ffmpeg, remote_closes, tv_state, upload, wait_done
+from helpers import needs_ffmpeg, pair_key, pair_status, remote_closes, start_pairing, tv_state, upload, wait_done
 
 
 def test_websocket_requires_login(anon):
@@ -97,6 +97,39 @@ def test_second_projector_replaces_first(client):
                 # Commands now go to the new projector.
                 remote.send_json({"type": "command", "action": "play"})
                 assert second.receive_json() == {"type": "command", "action": "play"}
+
+
+def test_a_phone_can_disconnect_the_projector(client):
+    with client.websocket_connect("/ws?role=remote") as remote:
+        remote.receive_json()
+        with client.websocket_connect("/ws?role=tv") as tv:
+            assert remote.receive_json()["connected"] is True
+            remote.send_json({"type": "command", "action": "disconnect"})
+            with pytest.raises(WebSocketDisconnect) as closed:
+                tv.receive_json()
+            assert closed.value.code == 4001
+            assert remote.receive_json() == {"type": "tv", "connected": False}
+            # It is gone at once: the next command has no projector to go to.
+            remote.send_json({"type": "command", "action": "play"})
+            assert remote.receive_json() == {"type": "error", "message": "Проектор не на зв'язку"}
+        # The screen that was sent away may come back by itself.
+        with client.websocket_connect("/ws?role=tv"):
+            assert remote.receive_json() == {"type": "tv", "connected": True}
+
+
+def test_a_disconnected_projector_stays_paired(client, projector):
+    token = start_pairing(projector)
+    client.post("/api/pair/approve", json=pair_key(token))
+    assert pair_status(projector, token["token"]) == "approved"
+    with client.websocket_connect("/ws?role=remote") as remote:
+        remote.receive_json()
+        with projector.websocket_connect("/ws?role=tv") as tv:
+            remote.receive_json()
+            remote.send_json({"type": "command", "action": "disconnect"})
+            with pytest.raises(WebSocketDisconnect):
+                tv.receive_json()
+    assert len(client.get("/api/devices").json()["devices"]) == 1
+    assert projector.get("/api/me").json()["role"] == "device"
 
 
 def test_projector_state_is_sanitized(client):

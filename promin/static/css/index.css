@@ -32,6 +32,8 @@ button.projector { background: transparent; border: 0; padding: 0; font-weight: 
 #pair p { margin: 0; }
 #pair .hint { margin-top: 8px; color: var(--muted); font-size: 14px; }
 #pair-url { font-weight: 600; overflow-wrap: anywhere; }
+#tv-on { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+#tv-disconnect { margin-top: 12px; }
 .projector.on .dot { background: var(--accent); }
 .projector.on { color: var(--text); }
 
@@ -51,7 +53,7 @@ button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); 
 .outline:hover:not(:disabled) { border-color: var(--muted); }
 
 #upload-btn { width: 100%; }
-#progress { margin-top: 16px; }
+#progress { margin-bottom: 16px; }
 #progress[hidden] { display: none; }
 .progress-row {
   display: flex;
@@ -64,9 +66,9 @@ button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); 
 .progress-row span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
 .bar { height: 100%; width: 0; background: var(--accent); transition: width 150ms; }
-#message { margin: 16px 0 0; color: var(--danger); font-size: 14px; }
+#message { margin: 0 0 16px; color: var(--danger); font-size: 14px; }
 #message:empty { display: none; }
-#disk { margin: 16px 0 24px; color: var(--muted); font-size: 14px; }
+#disk { margin: 12px 0 0; color: var(--muted); font-size: 14px; }
 
 #list { display: grid; gap: 16px; }
 .empty {
@@ -143,27 +145,12 @@ details.menu .pop button {
   padding: 0 12px;
 }
 
-footer {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 16px;
-  margin-top: 32px;
-  color: var(--muted);
-  font-size: 14px;
-}
-footer .who { flex: 1; min-width: 160px; }
-footer a { color: var(--text); }
-footer form { margin: 0; }
-footer button { min-height: 48px; padding: 0 16px; }
 [hidden] { display: none !important; }
 
-body.has-remote main { padding-bottom: 400px; }
-body.has-remote.remote-collapsed main { padding-bottom: 140px; }
+/* The remote lies over the page: main.js keeps --dock-h up to date so the list leaves it room. */
+#dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; }
+main { padding-bottom: calc(var(--dock-h, 0px) + 32px + env(safe-area-inset-bottom)); }
 #remote {
-  position: fixed;
-  left: 0; right: 0; bottom: 0;
-  z-index: 5;
   background: var(--panel);
   border-top: 1px solid var(--line);
   border-radius: var(--radius) var(--radius) 0 0;
@@ -247,11 +234,12 @@ button.thumb:focus-visible { outline-offset: -2px; }
   position: absolute; left: 50%; top: 50%;
   width: 40px; height: 40px; margin: -20px 0 0 -20px;
   display: grid; place-items: center;
-  border-radius: 50%; background: rgba(15, 17, 21, 0.6);
-  transition: background-color 150ms;
+  border-radius: 50%; background: rgba(15, 17, 21, 0.7);
+  transition: background-color 150ms, transform 150ms;
 }
-button.thumb:hover .play { background: rgba(15, 17, 21, 0.85); }
-.thumb .play svg { width: 20px; height: 20px; fill: var(--text); margin-left: 2px; }
+button.thumb:hover .play { background: rgba(15, 17, 21, 0.9); transform: scale(1.08); }
+/* The rounded triangle of the logo, in its colour. */
+.thumb .play svg { width: 22px; height: 22px; fill: var(--accent); margin-left: 1px; }
 .duration { right: 6px; bottom: 6px; padding: 1px 6px; font-size: 12px; }
 .card .body { flex: 1; display: flex; flex-direction: column; padding: 12px; }
 .name {
@@ -357,3 +345,53 @@ body.selecting .thumb .play { display: none; }
 .card.selected { outline: 3px solid var(--accent); outline-offset: -3px; }
 .card.selected .check { background: var(--accent); border-color: var(--accent); }
 .card.selected .check svg { visibility: visible; }
+
+/* ---------- side menu ---------- */
+/* Uploading, the links and the account. Always there on a wide screen; on a phone it
+   slides in from the left when the menu button is pressed. */
+#side {
+  position: fixed; left: 0; top: 0; bottom: 0; z-index: 8;
+  width: 264px; max-width: 86vw;
+  display: flex; flex-direction: column;
+  padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
+  background: var(--panel); border-right: 1px solid var(--line);
+  overflow-y: auto;
+}
+#side .brand { display: flex; align-items: center; gap: 8px; height: 48px; margin-bottom: 16px; font-size: 22px; font-weight: 700; }
+#side .brand img { width: 28px; height: 28px; }
+#side nav { display: grid; gap: 4px; margin-top: 24px; }
+#side nav a {
+  display: flex; align-items: center; min-height: 48px; margin: 0 -8px; padding: 0 12px;
+  border-radius: var(--radius); color: var(--text); text-decoration: none; font-weight: 600;
+  transition: background-color 150ms;
+}
+#side nav a:hover { background: var(--line); }
+#side nav a:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#side .account {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: auto; padding-top: 16px;
+  color: var(--muted); font-size: 14px;
+}
+#side .who { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+#side form { margin: 0; }
+#side .account button { min-height: 40px; padding: 0 16px; }
+#side-backdrop {
+  position: fixed; inset: 0; z-index: 7; background: rgba(0, 0, 0, 0.6);
+  opacity: 0; visibility: hidden; transition: opacity 200ms, visibility 200ms;
+}
+#menu-btn { margin-left: -12px; }
+@media (max-width: 899px) {
+  #side { transform: translateX(-100%); visibility: hidden; transition: transform 200ms, visibility 200ms; }
+  body.side-open #side { transform: none; visibility: visible; }
+  body.side-open #side-backdrop { opacity: 1; visibility: visible; }
+  body.side-open { overflow: hidden; }
+}
+@media (min-width: 900px) {
+  main { margin-left: 264px; padding-left: 24px; padding-right: 24px; }
+  #dock { left: 264px; }
+  #menu-btn, header img, header h1 { display: none; }
+  header { justify-content: flex-end; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #side, #side-backdrop { transition: none; }
+}
