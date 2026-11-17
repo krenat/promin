@@ -56,7 +56,7 @@ def make_client(tmp_path: Path, login: bool = True, **overrides) -> TestClient:
     settings = Settings(data_dir=tmp_path, token=TOKEN, **overrides)
     client = TestClient(create_app(settings))
     if login:
-        # Cookie, яку сервер видає після входу, однакова для того самого токена.
+        # Сесії лежать у теці з даними, тож cookie діє і в застосунку, запущеному після.
         with TestClient(create_app(settings), follow_redirects=False) as tmp:
             r = sign_in(tmp)
             assert r.status_code == 303
@@ -420,6 +420,106 @@ def test_login_attempts_are_limited(anon):
     assert anon.get("/api/videos").status_code == 401
 
 
+def test_successful_login_does_not_reset_earlier_failures(client):
+    assert add_user(client).status_code == 201
+    anon = TestClient(client.app, follow_redirects=False)
+    # Власний вдалий вхід не дає глядачу нових спроб підбирати чужий пароль.
+    for _ in range(4):
+        assert sign_in(anon, password="wrong").status_code == 401
+    assert sign_in(anon, "olena", VIEWER_PASSWORD).status_code == 303
+    anon.cookies.clear()
+    assert sign_in(anon, password="wrong").status_code == 401
+    assert sign_in(anon).status_code == 429
+
+
+def test_successful_logins_are_not_counted(anon):
+    for _ in range(8):
+        assert sign_in(anon).status_code == 303
+        anon.cookies.clear()
+
+
+def test_login_attempt_is_counted_before_the_password_is_checked(anon):
+    limiter_hits = []
+    original = anon.app.state.users.get
+
+    def spy(username):
+        # У цю мить пароль ще перевіряється, а спробу вже записано.
+        limiter_hits.append(sign_in_blocked_after(anon, 4))
+        return original(username)
+
+    anon.app.state.users.get = spy
+    assert sign_in(anon, "nobody", "whatever-123").status_code == 401
+    assert limiter_hits == [True]
+
+
+def sign_in_blocked_after(client: TestClient, more: int) -> bool:
+    """Чи блокує вхід після ще `more` невдалих спроб."""
+    other = TestClient(client.app, follow_redirects=False)
+    for _ in range(more):
+        assert sign_in(other, password="wrong").status_code == 401
+    return sign_in(other).status_code == 429
+
+
+def test_login_body_without_length_is_limited(anon):
+    def body():
+        yield b"username=admin&password="
+        for _ in range(64):
+            yield b"x" * 1024
+
+    assert anon.post("/login", content=body()).status_code == 413
+    assert anon.post("/login", content=b"x" * 5000).status_code == 413
+
+
+def test_each_login_gets_its_own_session(anon, tmp_path):
+    first = sign_in(anon).cookies["promin_session"]
+    anon.cookies.clear()
+    second = sign_in(anon).cookies["promin_session"]
+    assert first != second
+    # У файлі лежить лише хеш секрету.
+    stored = (tmp_path / "sessions.json").read_text(encoding="utf-8")
+    assert first.split(".", 1)[1] not in stored and TOKEN not in stored
+
+
+def test_logout_revokes_the_session_on_the_server(anon):
+    cookie = sign_in(anon).cookies["promin_session"]
+    assert anon.post("/logout").status_code == 303
+    # Навіть якщо cookie хтось зберіг, вона більше не діє.
+    anon.cookies.set("promin_session", cookie)
+    assert anon.get("/api/me").status_code == 401
+
+
+def test_logout_needs_the_real_cookie_to_revoke(anon):
+    cookie = sign_in(anon).cookies["promin_session"]
+    other = TestClient(anon.app, follow_redirects=False)
+    other.cookies.set("promin_session", cookie.split(".", 1)[0] + ".guess")
+    assert other.post("/logout").status_code == 303
+    assert anon.get("/api/me").status_code == 200
+
+
+def test_idle_session_expires(anon):
+    cookie = sign_in(anon).cookies["promin_session"]
+    sessions = anon.app.state.sessions
+    session_id = cookie.split(".", 1)[0]
+    # Сесією користувалися — позначка оновлюється, і вона живе далі.
+    sessions._sessions[session_id]["seen"] -= 29 * 24 * 3600
+    assert anon.get("/api/me").status_code == 200
+    assert time.time() - sessions.get(session_id)["seen"] < 60
+    # Не користувалися понад 30 днів — сесії немає.
+    sessions._sessions[session_id]["seen"] -= 31 * 24 * 3600
+    assert anon.get("/api/me").status_code == 401
+    assert sessions.get(session_id) is None
+
+
+def test_changing_token_ends_admin_sessions(tmp_path):
+    with make_client(tmp_path) as c:
+        assert c.get("/api/me").status_code == 200
+        cookie = c.cookies["promin_session"]
+    other = Settings(data_dir=tmp_path, token="another-token-1234567890")
+    with TestClient(create_app(other)) as c:
+        c.cookies.set("promin_session", cookie)
+        assert c.get("/api/me").status_code == 401
+
+
 # ---------------------------------------------------------- користувачі й ролі
 
 VIEWER_PASSWORD = "viewer-pass-1"
@@ -599,6 +699,16 @@ def test_websocket_requires_login(anon):
         with pytest.raises(WebSocketDisconnect) as closed:
             ws.receive_json()
     assert closed.value.code == 4401
+
+
+def test_websocket_rejects_foreign_origin(client):
+    # Сторінка з іншого сайту чи іншого порту цього ж сервера пульт не відкриє.
+    for origin in ("http://evil.example", "http://testserver:8081"):
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/ws?role=remote", headers={"origin": origin}):
+                pass
+    with client.websocket_connect("/ws?role=remote", headers={"origin": "http://testserver"}) as ws:
+        assert ws.receive_json() == {"type": "tv", "connected": False}
 
 
 def test_remote_sees_projector_come_and_go(client):

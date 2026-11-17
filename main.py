@@ -24,7 +24,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, unquote
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import anyio
 from fastapi import (
@@ -48,6 +48,10 @@ THUMB_VERSION = 2
 
 COOKIE_NAME = "promin_session"
 COOKIE_MAX_AGE = 365 * 24 * 3600
+# Сесія користувача завершується, якщо нею не користувалися стільки часу.
+SESSION_IDLE_TTL = 30 * 24 * 3600
+SESSION_TOUCH_EVERY = 24 * 3600  # як часто записувати, що сесією користувалися
+LOGIN_MAX_BODY = 4096
 MIN_TOKEN_LENGTH = 12
 
 # Куди можна повернути після входу і які команди пульт може слати проектору.
@@ -581,11 +585,19 @@ class LoginLimiter:
     def blocked(self, ip: str) -> bool:
         return len(self._recent(ip)) >= self.max_failures
 
-    def fail(self, ip: str) -> None:
-        self._failures.setdefault(ip, []).append(time.monotonic())
+    def fail(self, ip: str) -> float:
+        """Записує спробу й повертає її позначку, за якою спробу можна зняти."""
+        stamp = time.monotonic()
+        self._failures.setdefault(ip, []).append(stamp)
+        return stamp
 
-    def reset(self, ip: str) -> None:
-        self._failures.pop(ip, None)
+    def forgive(self, ip: str, stamp: float) -> None:
+        """Знімає одну спробу (вона виявилася вдалою); решта невдач лишається."""
+        attempts = self._failures.get(ip)
+        if attempts and stamp in attempts:
+            attempts.remove(stamp)
+            if not attempts:
+                del self._failures[ip]
 
 
 def same(a: str, b: str) -> bool:
@@ -656,6 +668,65 @@ class UserStore:
             if username not in self._users:
                 return False
             del self._users[username]
+            self._save()
+            return True
+
+
+class SessionStore:
+    """Сесії користувачів. Зберігаємо лише хеш секрету з cookie."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._sessions: Dict[str, Dict[str, Any]] = {}
+
+    def load(self) -> None:
+        with self._lock:
+            if self.path.exists():
+                self._sessions = json.loads(self.path.read_text(encoding="utf-8"))
+            else:
+                self._sessions = {}
+
+    def _save(self) -> None:
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps(self._sessions, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.path)
+
+    def add(self, username: str, fingerprint: str) -> str:
+        """Створює сесію і повертає значення її cookie. Заодно прибирає прострочені."""
+        session_id = secrets.token_hex(8)
+        secret = secrets.token_urlsafe(32)
+        now = time.time()
+        with self._lock:
+            for key in [k for k, v in self._sessions.items() if v["seen"] < now - SESSION_IDLE_TTL]:
+                del self._sessions[key]
+            self._sessions[session_id] = {
+                "username": username,
+                "hash": hashlib.sha256(secret.encode("utf-8")).hexdigest(),
+                "fingerprint": fingerprint,
+                "created": now,
+                "seen": now,
+            }
+            self._save()
+        return "%s.%s" % (session_id, secret)
+
+    def get(self, session_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            return dict(session) if session else None
+
+    def touch(self, session_id: str) -> None:
+        with self._lock:
+            if session_id in self._sessions:
+                self._sessions[session_id]["seen"] = time.time()
+                self._save()
+
+    def remove(self, session_id: str) -> bool:
+        with self._lock:
+            if session_id not in self._sessions:
+                return False
+            del self._sessions[session_id]
             self._save()
             return True
 
@@ -831,9 +902,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         raise RuntimeError(
             "Задайте PROMIN_TOKEN: щонайменше %d символів" % MIN_TOKEN_LENGTH
         )
-    # Ключ для підпису cookie; сам токен у cookie не потрапляє.
+    # Ключ для відбитків сесій; сам токен ні в cookie, ні у файли не потрапляє.
     secret = hmac.new(settings.token.encode("utf-8"), b"promin-session", "sha256").digest()
     users = UserStore(settings.data_dir / "users.json")
+    sessions = SessionStore(settings.data_dir / "sessions.json")
     devices = DeviceStore(settings.data_dir / "devices.json")
     pairing = Pairing()
     limiter = LoginLimiter()
@@ -854,6 +926,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             leftover.unlink(missing_ok=True)
         store.load()
         users.load()
+        sessions.load()
         devices.load()
         await transcoder.start()
         yield
@@ -864,6 +937,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.state.store = store
     app.state.transcoder = transcoder
     app.state.users = users
+    app.state.sessions = sessions
     app.state.hub = hub
     app.state.devices = devices
     app.state.pairing = pairing
@@ -872,13 +946,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def fingerprint(username: str) -> Optional[str]:
         """Те, від чого залежить сесія: зміна пароля чи видалення її скасовує."""
         if username == ADMIN:
-            return "admin:" + settings.token
-        user = users.get(username)
-        return user["hash"] if user else None
-
-    def session_cookie(username: str) -> str:
-        message = (username + "|" + (fingerprint(username) or "")).encode("utf-8")
-        return username + "." + hmac.new(secret, message, "sha256").hexdigest()
+            source = "admin:" + settings.token
+        else:
+            user = users.get(username)
+            if user is None:
+                return None
+            source = user["hash"]
+        message = (username + "|" + source).encode("utf-8")
+        return hmac.new(secret, message, "sha256").hexdigest()
 
     def current_user(request: HTTPConnection) -> Optional[Dict[str, Any]]:
         raw = request.cookies.get(COOKIE_NAME, "")
@@ -889,11 +964,19 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             if device is None or not same(digest, device["hash"]):
                 return None
             return {"username": device["name"], "role": "device", "device_id": device_id}
-        username = raw.partition(".")[0]
-        if not username or fingerprint(username) is None:
+        session_id, _, secret = raw.partition(".")
+        session = sessions.get(session_id) if session_id and secret else None
+        digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+        if session is None or not same(digest, session["hash"]):
             return None
-        if not same(raw, session_cookie(username)):
+        username = session["username"]
+        current = fingerprint(username)
+        idle = time.time() - session["seen"]
+        if current is None or not same(current, session["fingerprint"]) or idle > SESSION_IDLE_TTL:
+            sessions.remove(session_id)
             return None
+        if idle > SESSION_TOUCH_EVERY:
+            sessions.touch(session_id)
         role = "admin" if username == ADMIN else (users.get(username) or {}).get("role")
         return {"username": username, "role": role}
 
@@ -946,19 +1029,27 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         ip = request.client.host if request.client else "unknown"
         if limiter.blocked(ip):
             return login_page("Забагато спроб. Спробуйте знову за 15 хвилин.", 429)
-        if int(request.headers.get("content-length") or 0) > 4096:
-            return login_page("Забагато даних.", 413)
-        form = parse_qs((await request.body()).decode("utf-8", errors="replace"))
+        # Спробу рахуємо ще до перевірки пароля: між перевіркою ліміту й записом немає
+        # жодного await, тож паралельні запити ліміт не обходять.
+        attempt = limiter.fail(ip)
+        # Тіло читаємо потоком і зупиняємось на межі: Content-Length може бути відсутній.
+        body = b""
+        async for chunk in request.stream():
+            body += chunk
+            if len(body) > LOGIN_MAX_BODY:
+                return login_page("Забагато даних.", 413)
+        form = parse_qs(body.decode("utf-8", errors="replace"))
         username = (form.get("username") or [""])[0].strip().lower()
         password = (form.get("password") or [""])[0]
         next_path = safe_next((form.get("next") or [""])[0])
         if not await check_password(username, password):
-            limiter.fail(ip)
             return login_page("Неправильний логін або пароль.", 401, next_path)
-        limiter.reset(ip)
+        # Вдалий вхід знімає лише власну спробу: попередні невдачі з цієї адреси лишаються.
+        limiter.forgive(ip, attempt)
+        cookie = sessions.add(username, fingerprint(username) or "")
         response = RedirectResponse(next_path, status_code=303)
         response.set_cookie(
-            COOKIE_NAME, session_cookie(username),
+            COOKIE_NAME, cookie,
             max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax",
         )
         return response
@@ -996,7 +1087,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         return response
 
     @app.post("/logout")
-    async def logout() -> Response:
+    async def logout(request: Request) -> Response:
+        # Сесію прибираємо і на сервері: перехоплена cookie після виходу не діє.
+        raw = request.cookies.get(COOKIE_NAME, "")
+        if raw and not raw.startswith("@"):
+            session_id, _, secret = raw.partition(".")
+            session = sessions.get(session_id)
+            digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+            if session is not None and same(digest, session["hash"]):
+                sessions.remove(session_id)
         response = RedirectResponse("/login", status_code=303)
         response.delete_cookie(COOKIE_NAME)
         return response
@@ -1210,6 +1309,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @app.websocket("/ws")
     async def websocket(ws: WebSocket) -> None:
         role = ws.query_params.get("role")
+        # Браузер завжди називає сторінку, що відкриває з'єднання. Чужу (зокрема з іншого
+        # порту цього ж сервера, куди cookie теж потрапляє) не пускаємо.
+        origin = ws.headers.get("origin")
+        if origin is not None and urlsplit(origin).netloc != ws.headers.get("host"):
+            await ws.close(code=1008)
+            return
         await ws.accept()
         user = current_user(ws)
         if user is None:
