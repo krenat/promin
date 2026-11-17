@@ -9,7 +9,7 @@ services:
       - "${PROMIN_PORT:-8080}:${PROMIN_PORT:-8080}"
     volumes:
       - promin-data:/data
-    # Щоб ffmpeg не забирав процесор у сусідніх контейнерів.
+    # So that ffmpeg does not starve neighbouring containers of CPU.
     cpus: ${PROMIN_CPUS:-2}
     stop_grace_period: 10s
 

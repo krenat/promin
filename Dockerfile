@@ -1,11 +1,11 @@
 FROM python:3.12-slim
 
-# ffmpeg з Debian зібрано з libzimg, потрібним для HDR → SDR.
+# Debian's ffmpeg is built with libzimg, which HDR → SDR needs.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
-# Сервіс працює не від root; дані лежать у /data.
+# The service does not run as root; data lives in /data.
 RUN useradd --create-home --uid 1000 promin \
  && mkdir /data \
  && chown promin:promin /data

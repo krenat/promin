@@ -24,7 +24,7 @@ from main import (  # noqa: E402
 
 TOKEN = "test-token-1234567890"
 FFMPEG = shutil.which("ffmpeg")
-needs_ffmpeg = pytest.mark.skipif(FFMPEG is None, reason="потрібен ffmpeg")
+needs_ffmpeg = pytest.mark.skipif(FFMPEG is None, reason="needs ffmpeg")
 
 
 def make_clip(path: Path, size: str = "320x240", extra: tuple = ()) -> bytes:
@@ -56,7 +56,7 @@ def make_client(tmp_path: Path, login: bool = True, **overrides) -> TestClient:
     settings = Settings(data_dir=tmp_path, token=TOKEN, **overrides)
     client = TestClient(create_app(settings))
     if login:
-        # Сесії лежать у теці з даними, тож cookie діє і в застосунку, запущеному після.
+        # Sessions live in the data directory, so the cookie also works in an app started later.
         with TestClient(create_app(settings), follow_redirects=False) as tmp:
             r = sign_in(tmp)
             assert r.status_code == 303
@@ -85,7 +85,7 @@ def wait_done(client: TestClient, video_id: str, timeout: float = 60) -> dict:
         if videos[video_id]["status"] in ("ready", "error"):
             return videos[video_id]
         time.sleep(0.1)
-    raise AssertionError("обробка не завершилася за %s с" % timeout)
+    raise AssertionError("processing did not finish in %s s" % timeout)
 
 
 def probe_video(path: Path) -> dict:
@@ -100,7 +100,7 @@ def probe_video(path: Path) -> dict:
     return json.loads(out)["streams"][0]
 
 
-# ------------------------------------------------------------ рішення за ffprobe
+# -------------------------------------------------------- decisions from ffprobe
 
 
 def fake_probe(**video) -> dict:
@@ -147,7 +147,7 @@ def test_only_audio_is_transcoded_when_video_already_fits():
     probe = fake_probe()
     probe["streams"][1]["codec_name"] = "ac3"
     assert plan_encode(probe, SETTINGS)["mode"] == "audio"
-    # AAC 5.1 теж зводимо до стерео, не чіпаючи картинку.
+    # AAC 5.1 is downmixed to stereo too, without touching the picture.
     surround = fake_probe()
     surround["streams"][1]["channels"] = 6
     assert plan_encode(surround, SETTINGS)["mode"] == "audio"
@@ -197,7 +197,7 @@ def test_remux_args_copy_streams():
     assert "+faststart" in args
 
 
-# ---------------------------------------------------------------- сервіс цілком
+# ------------------------------------------------------------ the whole service
 
 
 def test_index_page(client):
@@ -219,7 +219,7 @@ def test_upload_process_play_delete(client, tmp_path, small_clip):
     assert video["thumb"] is True
     assert 0.9 < video["duration"] < 1.2
 
-    # Оригінал прибрано, готовий файл названий сервером.
+    # The original is gone; the finished file is named by the server.
     assert list((tmp_path / "uploads").iterdir()) == []
     ready = tmp_path / "videos" / (video["id"] + ".mp4")
     assert [p.name for p in (tmp_path / "videos").iterdir()] == [ready.name]
@@ -265,7 +265,7 @@ def test_broken_file_gets_error_and_can_be_retried(client, tmp_path):
     assert video["status"] == "error"
     assert video["error"]
     assert client.get("/media/" + video["id"]).status_code == 404
-    # Оригінал лишається, щоб можна було повторити.
+    # The original stays so that processing can be retried.
     assert len(list((tmp_path / "uploads").iterdir())) == 1
 
     assert client.post("/api/videos/%s/retry" % video["id"]).status_code == 200
@@ -286,7 +286,7 @@ def test_delete_while_waiting_in_queue(client, tmp_path, big_clip, small_clip):
     second = upload(client, small_clip).json()
     assert client.delete("/api/videos/" + second["id"]).status_code == 204
     assert client.delete("/api/videos/" + first["id"]).status_code == 204
-    time.sleep(1.5)  # воркер має помітити видалення і прибрати за собою
+    time.sleep(1.5)  # the worker has to notice the deletion and clean up
     assert client.get("/api/videos").json()["videos"] == []
     for folder in ("uploads", "videos", "thumbs"):
         assert list((tmp_path / folder).iterdir()) == []
@@ -342,7 +342,7 @@ def test_delete_unknown_video(client):
     assert client.delete("/api/videos/nope").status_code == 404
 
 
-# -------------------------------------------------------------------------- вхід
+# ------------------------------------------------------------------------- login
 
 
 @pytest.fixture
@@ -364,7 +364,7 @@ def test_pages_redirect_to_login(anon):
         r = anon.get(path)
         assert r.status_code == 303, path
         assert r.headers["location"] == "/login"
-    # Сторінка проектора відкрита: без входу вона лише показує код підключення.
+    # The projector page is open: without a login it only shows a pairing code.
     r = anon.get("/tv")
     assert r.status_code == 200
     assert "pair-code" in r.text
@@ -396,7 +396,7 @@ def test_login_sets_long_lived_http_only_cookie(anon):
     assert "max-age=31536000" in cookie
     assert TOKEN not in r.headers["set-cookie"]
     assert anon.get("/api/videos").status_code == 200
-    assert anon.get("/login").status_code == 303  # уже увійшли
+    assert anon.get("/login").status_code == 303  # already logged in
 
 
 def test_wrong_token_is_rejected(anon):
@@ -415,7 +415,7 @@ def test_forged_cookie_is_rejected(anon):
 def test_login_attempts_are_limited(anon):
     for _ in range(5):
         assert sign_in(anon, password="wrong").status_code == 401
-    # Після п'яти невдач не пускає навіть правильний пароль.
+    # After five failures even the right password is refused.
     assert sign_in(anon).status_code == 429
     assert anon.get("/api/videos").status_code == 401
 
@@ -423,7 +423,7 @@ def test_login_attempts_are_limited(anon):
 def test_successful_login_does_not_reset_earlier_failures(client):
     assert add_user(client).status_code == 201
     anon = TestClient(client.app, follow_redirects=False)
-    # Власний вдалий вхід не дає глядачу нових спроб підбирати чужий пароль.
+    # A viewer's own successful login gives no new attempts at someone else's password.
     for _ in range(4):
         assert sign_in(anon, password="wrong").status_code == 401
     assert sign_in(anon, "olena", VIEWER_PASSWORD).status_code == 303
@@ -443,7 +443,7 @@ def test_login_attempt_is_counted_before_the_password_is_checked(anon):
     original = anon.app.state.users.get
 
     def spy(username):
-        # У цю мить пароль ще перевіряється, а спробу вже записано.
+        # At this moment the password is still being checked, yet the attempt is recorded.
         limiter_hits.append(sign_in_blocked_after(anon, 4))
         return original(username)
 
@@ -453,7 +453,7 @@ def test_login_attempt_is_counted_before_the_password_is_checked(anon):
 
 
 def sign_in_blocked_after(client: TestClient, more: int) -> bool:
-    """Чи блокує вхід після ще `more` невдалих спроб."""
+    """Whether login is blocked after `more` further failed attempts."""
     other = TestClient(client.app, follow_redirects=False)
     for _ in range(more):
         assert sign_in(other, password="wrong").status_code == 401
@@ -475,7 +475,7 @@ def test_each_login_gets_its_own_session(anon, tmp_path):
     anon.cookies.clear()
     second = sign_in(anon).cookies["promin_session"]
     assert first != second
-    # У файлі лежить лише хеш секрету.
+    # The file holds only a hash of the secret.
     stored = (tmp_path / "sessions.json").read_text(encoding="utf-8")
     assert first.split(".", 1)[1] not in stored and TOKEN not in stored
 
@@ -483,7 +483,7 @@ def test_each_login_gets_its_own_session(anon, tmp_path):
 def test_logout_revokes_the_session_on_the_server(anon):
     cookie = sign_in(anon).cookies["promin_session"]
     assert anon.post("/logout").status_code == 303
-    # Навіть якщо cookie хтось зберіг, вона більше не діє.
+    # Even if someone kept the cookie, it no longer works.
     anon.cookies.set("promin_session", cookie)
     assert anon.get("/api/me").status_code == 401
 
@@ -500,11 +500,11 @@ def test_idle_session_expires(anon):
     cookie = sign_in(anon).cookies["promin_session"]
     sessions = anon.app.state.sessions
     session_id = cookie.split(".", 1)[0]
-    # Сесією користувалися — позначка оновлюється, і вона живе далі.
+    # The session was used: the stamp is refreshed and it lives on.
     sessions._sessions[session_id]["seen"] -= 29 * 24 * 3600
     assert anon.get("/api/me").status_code == 200
     assert time.time() - sessions.get(session_id)["seen"] < 60
-    # Не користувалися понад 30 днів — сесії немає.
+    # Unused for more than 30 days: the session is gone.
     sessions._sessions[session_id]["seen"] -= 31 * 24 * 3600
     assert anon.get("/api/me").status_code == 401
     assert sessions.get(session_id) is None
@@ -520,7 +520,7 @@ def test_changing_token_ends_admin_sessions(tmp_path):
         assert c.get("/api/me").status_code == 401
 
 
-# ---------------------------------------------------------- користувачі й ролі
+# ------------------------------------------------------------- users and roles
 
 VIEWER_PASSWORD = "viewer-pass-1"
 
@@ -531,7 +531,7 @@ def add_user(client: TestClient, username: str = "olena", password: str = VIEWER
 
 @pytest.fixture
 def viewer(client, tmp_path):
-    """Клієнт, що увійшов як глядач; `client` поруч лишається адміністратором."""
+    """A client logged in as a viewer; `client` alongside stays the administrator."""
     assert add_user(client).status_code == 201
     c = TestClient(client.app, follow_redirects=False)
     assert sign_in(c, "olena", VIEWER_PASSWORD).status_code == 303
@@ -547,7 +547,7 @@ def test_admin_manages_users(client, tmp_path):
     assert add_user(client).status_code == 201
     names = [u["username"] for u in client.get("/api/users").json()["users"]]
     assert names == ["admin", "olena"]
-    # Пароль у файлі не лежить відкритим текстом.
+    # The password is not stored in the file as plain text.
     assert VIEWER_PASSWORD not in (tmp_path / "users.json").read_text(encoding="utf-8")
 
     assert client.delete("/api/users/olena").status_code == 204
@@ -665,7 +665,7 @@ def test_users_survive_restart(tmp_path):
         assert sign_in(c, "olena", VIEWER_PASSWORD).status_code == 303
 
 
-# ------------------------------------------------------------------------ пульт
+# ----------------------------------------------------------------------- remote
 
 from starlette.websockets import WebSocketDisconnect  # noqa: E402
 
@@ -702,7 +702,7 @@ def test_websocket_requires_login(anon):
 
 
 def test_websocket_rejects_foreign_origin(client):
-    # Сторінка з іншого сайту чи іншого порту цього ж сервера пульт не відкриє.
+    # A page from another site or another port of this server cannot open the remote.
     for origin in ("http://evil.example", "http://testserver:8081"):
         with pytest.raises(WebSocketDisconnect):
             with client.websocket_connect("/ws?role=remote", headers={"origin": origin}):
@@ -744,7 +744,7 @@ def test_commands_without_projector_report_error(client):
 @needs_ffmpeg
 def test_remote_controls_projector(client, viewer, small_clip):
     video = wait_done(client, upload(client, small_clip, name="party.mp4").json()["id"])
-    # Глядач теж може керувати показом.
+    # A viewer can control playback too.
     with client.websocket_connect("/ws?role=tv") as tv, viewer.websocket_connect("/ws?role=remote") as remote:
         assert remote.receive_json()["connected"] is True
 
@@ -762,7 +762,7 @@ def test_remote_controls_projector(client, viewer, small_clip):
             remote.send_json({"type": "command", "action": action})
             assert tv.receive_json() == {"type": "command", "action": action}
 
-        # Невідоме відео, невідома дія і сміття до проектора не доходять.
+        # An unknown video, an unknown action and garbage never reach the projector.
         remote.send_json({"type": "command", "action": "load", "video_id": "nope"})
         assert remote.receive_json() == {"type": "error", "message": "Це відео недоступне"}
         remote.send_json({"type": "command", "action": "format_disk"})
@@ -781,7 +781,7 @@ def test_second_projector_replaces_first(client):
                     first.receive_json()
                 assert closed.value.code == 4000
                 assert remote.receive_json()["connected"] is True
-                # Команди йдуть уже новому проектору.
+                # Commands now go to the new projector.
                 remote.send_json({"type": "command", "action": "play"})
                 assert second.receive_json() == {"type": "command", "action": "play"}
 
@@ -799,7 +799,7 @@ def test_projector_state_is_sanitized(client):
             assert len(state["name"]) == 200
 
 
-# ------------------------------------------------------ підключення проектора кодом
+# ------------------------------------------------------ pairing a projector by code
 
 
 def start_pairing(tv: TestClient) -> dict:
@@ -814,7 +814,7 @@ def pair_status(tv: TestClient, token: str) -> str:
 
 @pytest.fixture
 def projector(client):
-    """Клієнт без входу, який грає роль браузера проектора."""
+    """A client without a login that plays the projector browser."""
     return TestClient(client.app, follow_redirects=False)
 
 
@@ -824,7 +824,7 @@ def test_projector_is_paired_by_code(client, projector):
     assert len(pairing["code"]) == 6 and pairing["code"].isdigit()
     assert pair_status(projector, pairing["token"]) == "pending"
 
-    # Код вводять на телефоні, де вже увійшли; пробіл посередині не заважає.
+    # The code is typed on a phone that is already logged in; a space in the middle is fine.
     spaced = pairing["code"][:3] + " " + pairing["code"][3:]
     assert client.post("/api/pair/approve", json={"code": spaced}).status_code == 200
 
@@ -868,10 +868,10 @@ def test_code_expires(client, projector):
 def test_approving_requires_a_logged_in_user(client, projector, viewer):
     pairing = start_pairing(projector)
     assert projector.post("/api/pair/approve", json={"code": pairing["code"]}).status_code == 401
-    # Глядач теж може підключити проектор.
+    # A viewer can pair a projector too.
     assert viewer.post("/api/pair/approve", json={"code": pairing["code"]}).status_code == 200
     assert pair_status(projector, pairing["token"]) == "approved"
-    # А сам проектор підключати інші проектори не може.
+    # But a projector itself cannot pair other projectors.
     other = TestClient(client.app, follow_redirects=False)
     second = start_pairing(other)
     assert projector.post("/api/pair/approve", json={"code": second["code"]}).status_code == 403
@@ -934,14 +934,14 @@ def test_devices_survive_restart(tmp_path):
         pairing = start_pairing(tv)
         c.post("/api/pair/approve", json={"code": pairing["code"]})
         cookie = tv.post("/api/pair/status", json={"token": pairing["token"]}).cookies["promin_session"]
-        # Секрет пристрою у файлі не лежить відкритим текстом.
+        # The device secret is not stored in the file as plain text.
         assert cookie.split(".", 1)[1] not in (tmp_path / "devices.json").read_text(encoding="utf-8")
     with make_client(tmp_path, login=False) as c:
         c.cookies.set("promin_session", cookie)
         assert c.get("/api/me").json()["role"] == "device"
 
 
-# -------------------------------------------------------------------- мініатюри
+# ------------------------------------------------------------------- thumbnails
 
 
 def test_thumbnail_is_taken_away_from_the_start_of_long_videos():
@@ -998,11 +998,11 @@ def test_tv_page_asks_for_fullscreen_on_start(anon):
     assert "requestFullscreen" in page and "webkitRequestFullscreen" in page
 
 
-# ------------------------------------------------------- перекодування лише звуку
+# --------------------------------------------------------- audio-only transcoding
 
 
 def stream_md5(path: Path, stream: str) -> str:
-    """Контрольна сума доріжки без перекодування: однакова, якщо доріжку скопійовано."""
+    """Checksum of a track without re-encoding: identical if the track was copied."""
     return subprocess.run(
         [FFMPEG, "-v", "error", "-i", str(path), "-map", stream, "-c", "copy", "-f", "md5", "-"],
         check=True, capture_output=True, text=True,
@@ -1035,5 +1035,5 @@ def test_surround_ac3_audio_is_converted_without_touching_video(client, tmp_path
         check=True, capture_output=True, text=True,
     ).stdout)["streams"][0]
     assert (audio["codec_name"], audio["channels"]) == ("aac", 2)
-    # Відеодоріжка та сама, біт у біт.
+    # The video track is the same, bit for bit.
     assert stream_md5(ready, "0:v:0") == stream_md5(source, "0:v:0")

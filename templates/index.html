@@ -260,7 +260,7 @@
   #player-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
   #player-close { padding: 0 16px; }
 
-  /* ---------- компактна сітка карток ---------- */
+  /* ---------- compact card grid ---------- */
   main { max-width: 1200px; }
   #upload-btn, #progress, #pair { max-width: 560px; }
   #list { gap: 12px; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
@@ -475,7 +475,7 @@
     var card = el('article', 'card');
     var ready = item.status === 'ready';
 
-    // Мініатюра — це кнопка «дивитись тут».
+    // The thumbnail is the "watch here" button.
     var thumb = el('button', 'thumb');
     thumb.type = 'button';
     thumb.disabled = !ready;
@@ -558,12 +558,12 @@
     var busy = data.videos.some(function (v) {
       return v.status === 'queued' || v.status === 'processing';
     });
-    // Поки щось обробляється, список оновлюється сам.
+    // While something is processing, the list refreshes itself.
     if (busy) pollTimer = setTimeout(refresh, 3000);
   }
 
   function renderList() {
-    // Не перемальовуємо список без змін, щоб не закривати відкрите меню.
+    // Do not redraw an unchanged list, so that an open menu stays open.
     var snapshot = JSON.stringify([videosCache, canCast()]);
     if (snapshot === lastRendered) return;
     lastRendered = snapshot;
@@ -575,7 +575,7 @@
     videosCache.forEach(function (item) { list.appendChild(renderCard(item)); });
   }
 
-  // ------------------------------------------------------------------ пульт
+  // ------------------------------------------------------------------ remote
 
   function canCast() {
     return tvConnected && !!tvState && tvState.started;
@@ -683,7 +683,7 @@
     };
   }
 
-  // ------------------------------------------------- підключення проектора
+  // ------------------------------------------------- pairing a projector
 
   var pairBox = document.getElementById('pair');
   var pairInput = document.getElementById('pair-code');
@@ -749,7 +749,7 @@
   document.getElementById('r-vol').addEventListener('input', function () {
     command('volume', { value: Number(this.value) / 100 });
   });
-  // Після розблокування телефона з'єднання відновлюємо одразу, не чекаючи таймера.
+  // After the phone is unlocked, reconnect at once without waiting for the timer.
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState === 'visible') connect();
   });
