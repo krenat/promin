@@ -54,6 +54,15 @@ docker compose up -d --build
 
 All settings are environment variables; `.env.example` lists and describes them. The service does not start without `PROMIN_TOKEN` (at least 12 characters).
 
+## Encoding settings
+
+Any user chooses how new videos are encoded on the `/settings` page: the largest resolution (720p to 4K), the largest frame rate, the video bitrate ceiling, quality (CRF), the audio bitrate and the x264 preset.
+
+- The settings apply to videos that start processing after they are saved. Videos that are already processed are not touched.
+- A video is never enlarged: a smaller resolution, frame rate or bitrate than the limits stays as it is.
+- A transcoded video does not get a higher bitrate than its original had. For HEVC, AV1 and VP9 originals the ceiling is 1.8 times the original bitrate, because H.264 needs more bits for the same picture.
+- `PROMIN_MAX_BITRATE_KBPS` and `PROMIN_X264_PRESET` are the defaults until the settings are saved on the page.
+
 ## Projector and remote
 
 1. Open `/tv` in the projector's browser. A six-digit code appears on the screen: on the phone, tap the pair-projector link and enter it. There is no password to type on the projector, and it is remembered as a trusted device.
@@ -61,7 +70,7 @@ All settings are environment variables; `.env.example` lists and describes them.
 3. Open `/` on the phone. The indicator in the header turns yellow when the projector is connected.
 4. Tap the cast button next to a video. A remote appears at the bottom: pause, seek by 10 seconds, a position slider, previous and next video, video volume, and a button that stops playback.
 
-- A code is valid for 10 minutes and works once. A paired projector can only show videos; the list of paired projectors is on the `/users` page, and an administrator can disconnect any of them.
+- A code is valid for 10 minutes and works once. A paired projector can only show videos: it cannot upload, delete or change settings; the list of paired projectors is on the `/users` page, and an administrator can disconnect any of them.
 - There is one projector: if `/tv` is opened on a second screen, playback moves there.
 - The projector page and the remote reconnect by themselves after a connection drop.
 - The volume on the remote is the video's volume; the page cannot change the projector's system volume.
@@ -71,7 +80,7 @@ All settings are environment variables; `.env.example` lists and describes them.
 
 - The built-in administrator has the login `admin`; its password is the value of `PROMIN_TOKEN`.
 - The administrator adds other users on the `/users` page. Their passwords are stored in the data volume only as hashes.
-- An **administrator** uploads and deletes videos and manages users. A **viewer** only watches.
+- A **viewer** watches, uploads and deletes videos, changes the encoding settings and controls the projector. An **administrator** can do all of that and also manages users and paired projectors.
 - The video library is shared by everyone.
 - Changing a password or deleting a user ends that user's sessions; changing `PROMIN_TOKEN` ends everyone's sessions.
 - Logging out revokes the session on the server. A session that has not been used for 30 days ends by itself.
@@ -79,9 +88,9 @@ All settings are environment variables; `.env.example` lists and describes them.
 
 ## How videos are processed
 
-- A file that is already 8-bit SDR H.264, fits into 1920×1080, has up to 60 frames per second and a moderate bitrate is only repackaged with `+faststart`.
+- A file that is already 8-bit SDR H.264 and fits the limits from the encoding settings (by default 1920×1080, 60 frames per second and a moderate bitrate) is only repackaged with `+faststart`.
 - If the video already fits but the audio does not (not AAC, or more than two channels, such as AC3 5.1), the picture is copied unchanged and only the audio is re-encoded to stereo AAC. This is many times faster and loses no picture quality.
-- Everything else is transcoded to 1080p H.264 High with a bitrate cap, a keyframe every 2 seconds and AAC audio; HDR is converted to SDR.
+- Everything else is transcoded to H.264 High within those limits, with a bitrate cap, a keyframe every 2 seconds and AAC audio; HDR is converted to SDR.
 - The original's metadata (including location) does not reach the finished file.
 - The original is deleted after successful processing.
 

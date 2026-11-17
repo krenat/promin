@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from main import (  # noqa: E402
     HDR_FILTER_ZSCALE,
+    Encoding,
     ProcessingError,
     Settings,
     build_ffmpeg_args,
@@ -115,7 +116,7 @@ def fake_probe(**video) -> dict:
     }
 
 
-SETTINGS = Settings(data_dir=Path("."), token=TOKEN)
+SETTINGS = Encoding()
 
 
 def test_plain_h264_is_remuxed():
@@ -184,7 +185,7 @@ def test_transcode_args_follow_the_plan():
     assert filters.index("scale=") < filters.index(HDR_FILTER_ZSCALE)
     assert "fps=60" in filters
     assert filters.endswith("format=yuv420p")
-    assert args[args.index("-maxrate") + 1] == "8000k"
+    assert args[args.index("-maxrate") + 1] == "6000k"  # the source bitrate
     assert "-force_key_frames" in args
     assert args[args.index("-color_trc") + 1] == "bt709"
 
@@ -589,7 +590,7 @@ def test_admin_role_user_cannot_delete_self(client):
 
 
 @needs_ffmpeg
-def test_viewer_can_watch_but_not_change(client, viewer, small_clip):
+def test_viewer_watches_adds_and_deletes_videos(client, viewer, small_clip):
     video = wait_done(client, upload(client, small_clip).json()["id"])
     assert video["status"] == "ready"
 
@@ -598,10 +599,19 @@ def test_viewer_can_watch_but_not_change(client, viewer, small_clip):
     assert viewer.get("/media/" + video["id"]).status_code == 200
     assert viewer.get("/thumb/" + video["id"]).status_code == 200
 
-    assert upload(viewer, small_clip).status_code == 403
-    assert viewer.delete("/api/videos/" + video["id"]).status_code == 403
-    assert viewer.post("/api/videos/%s/retry" % video["id"]).status_code == 403
-    assert len(client.get("/api/videos").json()["videos"]) == 1
+    # The library is shared: a viewer adds videos and deletes any of them.
+    own = upload(viewer, small_clip)
+    assert own.status_code == 201
+    # Poll with `client`: only its requests run in the event loop that owns the queue.
+    assert wait_done(client, own.json()["id"])["status"] == "ready"
+    assert viewer.delete("/api/videos/" + video["id"]).status_code == 204
+    assert [v["id"] for v in client.get("/api/videos").json()["videos"]] == [own.json()["id"]]
+
+
+def test_viewer_can_retry_a_failed_video(client, viewer):
+    video = wait_done(client, upload(client, b"not a video" * 10).json()["id"])
+    assert video["status"] == "error"
+    assert viewer.post("/api/videos/%s/retry" % video["id"]).status_code == 200
 
 
 def test_viewer_cannot_manage_users(viewer):
@@ -884,6 +894,12 @@ def test_projector_can_only_show(client, projector):
 
     assert projector.get("/api/videos").status_code == 200
     assert upload(projector, b"x" * 100).status_code == 403
+    assert projector.delete("/api/videos/abc").status_code == 403
+    assert projector.post("/api/videos/abc/retry").status_code == 403
+    assert projector.get("/api/settings").status_code == 403
+    assert projector.put("/api/settings", json=NEW_ENCODING).status_code == 403
+    r = projector.get("/settings", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/"
     assert projector.get("/api/users").status_code == 403
     assert projector.get("/api/devices").status_code == 403
     assert add_user(projector, "petro").status_code == 403
@@ -1037,3 +1053,115 @@ def test_surround_ac3_audio_is_converted_without_touching_video(client, tmp_path
     assert (audio["codec_name"], audio["channels"]) == ("aac", 2)
     # The video track is the same, bit for bit.
     assert stream_md5(ready, "0:v:0") == stream_md5(source, "0:v:0")
+
+
+# ------------------------------------------------------------ encoding settings
+
+
+def test_transcoded_bitrate_follows_the_source():
+    # A low-bitrate original is not inflated to the configured ceiling.
+    plan = plan_encode(fake_probe(codec_name="mpeg4", bit_rate="2000000"), SETTINGS)
+    assert plan["mode"] == "transcode" and plan["max_rate_kbps"] == 2000
+    # More efficient codecs get headroom, because H.264 needs more bits.
+    assert plan_encode(fake_probe(codec_name="hevc", bit_rate="2000000"), SETTINGS)["max_rate_kbps"] == 3600
+    # A high-bitrate original is still held to the ceiling.
+    assert plan_encode(fake_probe(bit_rate="40000000"), SETTINGS)["max_rate_kbps"] == 8000
+    # An unknown source bitrate leaves the ceiling as configured.
+    probe = fake_probe(codec_name="hevc")
+    del probe["streams"][0]["bit_rate"]
+    assert plan_encode(probe, SETTINGS)["max_rate_kbps"] == 8000
+
+
+def test_encoding_limits_decide_what_is_transcoded():
+    uhd = fake_probe(width=3840, height=2160, bit_rate="20000000")
+    assert plan_encode(uhd, SETTINGS)["mode"] == "transcode"
+    roomy = Encoding(max_height=2160, max_bitrate_kbps=30000)
+    assert plan_encode(uhd, roomy)["mode"] == "remux"
+    # A lower limit sends even a 1080p file to transcoding.
+    assert plan_encode(fake_probe(), Encoding(max_height=720))["mode"] == "transcode"
+    assert plan_encode(fake_probe(avg_frame_rate="60/1"), Encoding(max_fps=30))["mode"] == "transcode"
+
+
+def test_transcode_args_use_the_encoding_settings():
+    encoding = Encoding(
+        max_height=720, max_fps=30, max_bitrate_kbps=4000, crf=18,
+        audio_bitrate_kbps=192, x264_preset="fast",
+    )
+    plan = plan_encode(fake_probe(avg_frame_rate="60/1", bit_rate="9000000"), encoding)
+    args = build_ffmpeg_args("ffmpeg", Path("in.mp4"), Path("out.mp4"), plan, encoding, None)
+    filters = args[args.index("-vf") + 1]
+    assert "min(1280,iw)" in filters and "min(720,ih)" in filters and "fps=30" in filters
+    assert args[args.index("-crf") + 1] == "18"
+    assert args[args.index("-preset") + 1] == "fast"
+    assert args[args.index("-maxrate") + 1] == "4000k"
+    assert args[args.index("-bufsize") + 1] == "8000k"
+    assert args[args.index("-b:a") + 1] == "192k"
+
+
+def test_settings_default_to_the_environment(tmp_path):
+    with make_client(tmp_path, max_bitrate_kbps=6000, x264_preset="fast") as c:
+        data = c.get("/api/settings").json()
+        assert data["encoding"] == data["defaults"]
+        assert data["encoding"]["max_bitrate_kbps"] == 6000
+        assert data["encoding"]["x264_preset"] == "fast"
+        assert data["encoding"]["max_height"] == 1080 and data["encoding"]["crf"] == 21
+        assert data["choices"]["max_height"] == [720, 1080, 1440, 2160]
+
+
+NEW_ENCODING = {
+    "max_height": 2160, "max_fps": 30, "max_bitrate_kbps": 30000, "crf": 19,
+    "audio_bitrate_kbps": 192, "x264_preset": "fast",
+}
+
+
+def test_admin_saves_settings_and_they_survive_restart(tmp_path):
+    with make_client(tmp_path) as c:
+        r = c.put("/api/settings", json=NEW_ENCODING)
+        assert r.status_code == 200 and r.json()["encoding"] == NEW_ENCODING
+        assert c.get("/api/settings").json()["encoding"] == NEW_ENCODING
+    with make_client(tmp_path) as c:
+        data = c.get("/api/settings").json()
+        assert data["encoding"] == NEW_ENCODING
+        assert data["defaults"]["max_height"] == 1080  # the reset button still has the defaults
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"max_height": 1000}, {"max_fps": 24}, {"max_bitrate_kbps": 10}, {"max_bitrate_kbps": 10**6},
+        {"crf": 5}, {"crf": 40}, {"audio_bitrate_kbps": 1}, {"x264_preset": "placebo; rm -rf /"},
+        {"crf": "high"},
+    ],
+)
+def test_invalid_settings_are_rejected(client, change):
+    before = client.get("/api/settings").json()["encoding"]
+    assert client.put("/api/settings", json={**NEW_ENCODING, **change}).status_code in (400, 422)
+    assert client.get("/api/settings").json()["encoding"] == before
+
+
+def test_every_user_reaches_settings(client, viewer, anon):
+    assert client.get("/settings").status_code == 200
+    assert viewer.get("/settings").status_code == 200
+    assert viewer.put("/api/settings", json=NEW_ENCODING).status_code == 200
+    assert client.get("/api/settings").json()["encoding"] == NEW_ENCODING
+    assert anon.get("/api/settings").status_code == 401
+    assert anon.put("/api/settings", json=NEW_ENCODING).status_code == 401
+    assert anon.get("/settings").status_code == 303
+
+
+def test_damaged_settings_file_falls_back_to_defaults(tmp_path):
+    (tmp_path / "encoding.json").write_text('{"max_height": 999}', encoding="utf-8")
+    with make_client(tmp_path) as c:
+        assert c.get("/api/settings").json()["encoding"]["max_height"] == 1080
+    (tmp_path / "encoding.json").write_text("not json", encoding="utf-8")
+    with make_client(tmp_path) as c:
+        assert c.get("/api/settings").json()["encoding"]["max_height"] == 1080
+
+
+@needs_ffmpeg
+def test_saved_settings_apply_to_the_next_upload(client, tmp_path, big_clip):
+    assert client.put("/api/settings", json={**NEW_ENCODING, "max_height": 720}).status_code == 200
+    video = wait_done(client, upload(client, big_clip).json()["id"])
+    assert video["status"] == "ready", video
+    stream = probe_video(tmp_path / "videos" / (video["id"] + ".mp4"))
+    assert (stream["width"], stream["height"]) == (1280, 720)

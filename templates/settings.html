@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0F1115">
+<title>Налаштування — Promin</title>
+<link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0F1115; --panel: #1A1D24; --line: #2A2E37; --text: #F2F0EA;
+    --muted: #9AA0AA; --accent: #FFC53D; --on-accent: #0F1115; --danger: #FF6B5E;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  html { color-scheme: dark; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 400 16px/1.4 Manrope, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 560px; margin: 0 auto; padding: 16px 16px calc(32px + env(safe-area-inset-bottom)); }
+  header { display: flex; align-items: center; gap: 8px; height: 48px; margin-bottom: 16px; }
+  header a.back {
+    display: grid; place-items: center; width: 48px; height: 48px; margin-left: -12px;
+    color: var(--text); text-decoration: none; font-size: 24px; border-radius: 50%;
+  }
+  header h1 { margin: 0; font-size: 22px; font-weight: 700; }
+  h2 { margin: 0 0 8px; font-size: 16px; font-weight: 600; color: var(--muted); }
+  .lead { margin: 0 0 24px; color: var(--muted); font-size: 14px; }
+  button, input, select { font: inherit; }
+  button {
+    font-weight: 600; min-height: 48px; padding: 0 16px; border-radius: var(--radius);
+    border: 1px solid transparent; cursor: pointer; transition: border-color 150ms, opacity 150ms;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+  .primary { background: var(--accent); color: var(--on-accent); }
+  .outline { background: transparent; color: var(--text); border-color: var(--line); }
+  .outline:hover:not(:disabled) { border-color: var(--muted); }
+  form { display: grid; gap: 16px; }
+  label { display: grid; gap: 8px; color: var(--muted); font-size: 14px; }
+  input, select {
+    width: 100%; height: 48px; padding: 0 16px; color: var(--text);
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  }
+  .hint { margin: -8px 0 0; color: var(--muted); font-size: 14px; }
+  .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .buttons button { flex: 1; min-width: 160px; }
+  #message { min-height: 24px; margin: 0; font-size: 14px; color: var(--text); }
+  #message.error { color: var(--danger); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <a class="back" href="/" aria-label="Назад до відео">←</a>
+    <h1>Налаштування</h1>
+  </header>
+
+  <h2>Кодування нових відео</h2>
+  <p class="lead">Діє для відео, які почнуть оброблятися після збереження. Готові відео не змінюються. Відео ніколи не збільшується: менша роздільність, частота кадрів чи бітрейт оригіналу лишаються як є.</p>
+
+  <form id="form">
+    <label>Найбільша роздільність
+      <select name="max_height"></select>
+    </label>
+    <p class="hint" id="height-hint" hidden>Понад 1080p варто вмикати, лише якщо браузер проектора відтворює таке відео без ривків.</p>
+
+    <label>Найбільша частота кадрів
+      <select name="max_fps"></select>
+    </label>
+
+    <label>Стеля бітрейту відео, кбіт/с
+      <input name="max_bitrate_kbps" type="number" inputmode="numeric" step="500" required>
+    </label>
+    <p class="hint" id="bitrate-hint"></p>
+
+    <label>Якість (CRF)
+      <input name="crf" type="number" inputmode="numeric" step="1" required>
+    </label>
+    <p class="hint" id="crf-hint"></p>
+
+    <label>Бітрейт звуку
+      <select name="audio_bitrate_kbps"></select>
+    </label>
+
+    <label>Швидкість кодування
+      <select name="x264_preset"></select>
+    </label>
+    <p class="hint">Повільніші пресети дають кращу якість за того самого бітрейту, але обробка триває довше й сильніше вантажить процесор.</p>
+
+    <p id="message" role="status"></p>
+    <div class="buttons">
+      <button class="primary" type="submit" id="save" disabled>Зберегти</button>
+      <button class="outline" type="button" id="reset" disabled>Повернути типові</button>
+    </div>
+  </form>
+</main>
+
+<script>
+(function () {
+  var form = document.getElementById('form');
+  var message = document.getElementById('message');
+  var save = document.getElementById('save');
+  var reset = document.getElementById('reset');
+  var defaults = null;
+  var HEIGHT_NAMES = { 720: '720p (HD)', 1080: '1080p (Full HD)', 1440: '1440p (2K)', 2160: '2160p (4K)' };
+  // A sensible bitrate ceiling for each resolution, suggested when the resolution changes.
+  var SUGGESTED_KBPS = { 720: 4000, 1080: 8000, 1440: 16000, 2160: 30000 };
+  var PRESET_NAMES = {
+    ultrafast: 'ultrafast — найшвидше, найгірша якість',
+    superfast: 'superfast',
+    veryfast: 'veryfast — швидко',
+    faster: 'faster',
+    fast: 'fast',
+    medium: 'medium — повільно, краща якість',
+    slow: 'slow — дуже повільно'
+  };
+
+  function say(text, isError) {
+    message.textContent = text;
+    message.className = isError ? 'error' : '';
+  }
+
+  function api(method, body) {
+    var options = { method: method, headers: {} };
+    if (body) {
+      options.headers['Content-Type'] = 'application/json';
+      options.body = JSON.stringify(body);
+    }
+    return fetch('/api/settings', options).then(function (r) {
+      if (r.status === 401) { location.href = '/login'; throw new Error('login'); }
+      if (r.ok) return r.json();
+      return r.json().catch(function () { return {}; }).then(function (data) {
+        throw new Error(typeof data.detail === 'string' ? data.detail : 'Помилка ' + r.status);
+      });
+    });
+  }
+
+  function fillSelect(select, values, label) {
+    select.textContent = '';
+    values.forEach(function (value) {
+      var option = document.createElement('option');
+      option.value = value;
+      option.textContent = label(value);
+      select.appendChild(option);
+    });
+  }
+
+  function show(values) {
+    Object.keys(values).forEach(function (key) { form[key].value = values[key]; });
+    updateHints();
+  }
+
+  function updateHints() {
+    var height = Number(form.max_height.value);
+    document.getElementById('height-hint').hidden = height <= 1080;
+    document.getElementById('bitrate-hint').textContent =
+      'Для ' + HEIGHT_NAMES[height] + ' зазвичай вистачає ' + SUGGESTED_KBPS[height] + ' кбіт/с.';
+  }
+
+  function build(data) {
+    var choices = data.choices;
+    defaults = data.defaults;
+    fillSelect(form.max_height, choices.max_height, function (v) { return HEIGHT_NAMES[v] || v + 'p'; });
+    fillSelect(form.max_fps, choices.max_fps, function (v) { return v + ' кадрів/с'; });
+    fillSelect(form.audio_bitrate_kbps, choices.audio_bitrate_kbps, function (v) { return v + ' кбіт/с'; });
+    fillSelect(form.x264_preset, choices.x264_preset, function (v) { return PRESET_NAMES[v] || v; });
+    form.max_bitrate_kbps.min = choices.max_bitrate_kbps[0];
+    form.max_bitrate_kbps.max = choices.max_bitrate_kbps[1];
+    form.crf.min = choices.crf[0];
+    form.crf.max = choices.crf[1];
+    document.getElementById('crf-hint').textContent =
+      'Від ' + choices.crf[0] + ' до ' + choices.crf[1] + '. Менше число — краща якість і більший файл; типове значення ' + defaults.crf + '.';
+    show(data.encoding);
+    save.disabled = false;
+    reset.disabled = false;
+  }
+
+  form.max_height.addEventListener('change', function () {
+    form.max_bitrate_kbps.value = SUGGESTED_KBPS[Number(form.max_height.value)];
+    updateHints();
+  });
+
+  reset.addEventListener('click', function () {
+    show(defaults);
+    say('Типові значення підставлено. Натисніть «Зберегти», щоб вони почали діяти.', false);
+  });
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    say('', false);
+    save.disabled = true;
+    api('PUT', {
+      max_height: Number(form.max_height.value),
+      max_fps: Number(form.max_fps.value),
+      max_bitrate_kbps: Number(form.max_bitrate_kbps.value),
+      crf: Number(form.crf.value),
+      audio_bitrate_kbps: Number(form.audio_bitrate_kbps.value),
+      x264_preset: form.x264_preset.value
+    }).then(function (data) {
+      show(data.encoding);
+      say('Збережено. Діятиме для наступних відео.', false);
+    }).catch(function (error) {
+      if (error.message !== 'login') say(error.message, true);
+    }).then(function () { save.disabled = false; });
+  });
+
+  api('GET').then(build).catch(function (error) {
+    if (error.message !== 'login') say(error.message, true);
+  });
+})();
+</script>
+</body>
+</html>
