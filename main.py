@@ -41,7 +41,10 @@ BASE_DIR = Path(__file__).resolve().parent
 MB = 1024 * 1024
 
 ALLOWED_EXT = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".3gp"}
-PUBLIC_KEYS = ("id", "name", "size", "status", "created", "duration", "thumb", "thumb_v", "error")
+PUBLIC_KEYS = (
+    "id", "name", "size", "status", "created", "duration", "thumb", "thumb_v", "error", "folder",
+    "info",
+)
 
 # Version of the thumbnail method: after it changes, old thumbnails are remade.
 THUMB_VERSION = 2
@@ -54,6 +57,8 @@ SESSION_TOUCH_EVERY = 24 * 3600  # how often to record that a session was used
 LOGIN_MAX_BODY = 4096
 BATCH_DELETE_MAX = 500
 QUEUE_MAX = 200
+FOLDERS_MAX = 100
+FOLDER_NAME_MAX = 60
 MIN_TOKEN_LENGTH = 12
 
 # Where login may redirect to, and which commands the remote may send to the projector.
@@ -358,6 +363,43 @@ def plan_encode(probe: Dict[str, Any], encoding: Encoding) -> Dict[str, Any]:
     }
 
 
+def video_info(probe: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """What the finished file is, for the card: frame size, frame rate, bitrate, codecs."""
+    streams = probe.get("streams") or []
+    video = next(
+        (
+            s for s in streams
+            if s.get("codec_type") == "video" and not (s.get("disposition") or {}).get("attached_pic")
+        ),
+        None,
+    )
+    if video is None:
+        return None
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    fps = parse_fps(video.get("avg_frame_rate")) or parse_fps(video.get("r_frame_rate"))
+    bitrate = 0.0
+    for value in (video.get("bit_rate"), (probe.get("format") or {}).get("bit_rate")):
+        try:
+            bitrate = float(value)
+            break
+        except (TypeError, ValueError):
+            continue
+    try:
+        width, height = int(video.get("width") or 0), int(video.get("height") or 0)
+        channels = int(audio.get("channels") or 0) if audio else 0
+    except (TypeError, ValueError):
+        return None
+    return {
+        "width": width,
+        "height": height,
+        "fps": round(fps, 2),
+        "bitrate_kbps": int(bitrate / 1000),
+        "video_codec": video.get("codec_name"),
+        "audio_codec": audio.get("codec_name") if audio else None,
+        "channels": channels,
+    }
+
+
 def build_ffmpeg_args(
     ffmpeg: str,
     src: Path,
@@ -464,7 +506,7 @@ class Transcoder:
             self.store.update(item["id"], status="queued", error=None)
             self.enqueue(item["id"])
         self._task = asyncio.create_task(self._run())
-        self._thumb_task = asyncio.create_task(self._refresh_thumbnails())
+        self._thumb_task = asyncio.create_task(self._maintenance())
 
     async def stop(self) -> None:
         for task in (self._thumb_task, self._task):
@@ -472,6 +514,34 @@ class Transcoder:
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
+
+    async def _maintenance(self) -> None:
+        """Brings videos processed by older versions up to date, one at a time."""
+        await self._backfill_info()
+        await self._refresh_thumbnails()
+
+    async def _backfill_info(self) -> None:
+        """Reads the quality of videos processed before it was recorded."""
+        if not self.ffprobe:
+            return
+        for item in self.store.list():
+            if item["status"] != "ready" or item.get("info"):
+                continue
+            video = self.settings.videos_dir / (item["id"] + ".mp4")
+            if not video.is_file():
+                continue
+            info = await self._info(video)
+            if info:
+                self.store.update(item["id"], info=info)
+
+    async def _info(self, video: Path) -> Optional[Dict[str, Any]]:
+        try:
+            return video_info(await self._probe(video))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # the card simply shows no quality
+            log.exception("Could not read the quality of %s", video.name)
+            return None
 
     async def _refresh_thumbnails(self) -> None:
         """Remakes thumbnails made the old way (often a black frame)."""
@@ -547,6 +617,7 @@ class Transcoder:
 
             os.replace(tmp, final)
             thumb = await self._thumbnail(final, video_id, plan["duration"])
+            info = await self._info(final)
             updated = self.store.update(
                 video_id,
                 status="ready",
@@ -554,6 +625,7 @@ class Transcoder:
                 duration=plan["duration"] or None,
                 thumb=thumb,
                 thumb_v=THUMB_VERSION,
+                info=info,
                 error=None,
             )
             if not updated:
@@ -821,6 +893,93 @@ class SessionStore:
             return True
 
 
+class FolderStore:
+    """Folders of the library, one level deep. A video names its folder; a folder lists nothing."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._folders: Dict[str, Dict[str, Any]] = {}
+
+    def load(self) -> None:
+        with self._lock:
+            self._folders = {}
+            if not self.path.exists():
+                return
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+                folders = {
+                    str(key): {"name": str(value["name"]), "created": float(value["created"])}
+                    for key, value in data.items()
+                }
+            except (ValueError, TypeError, KeyError, AttributeError):
+                # Videos keep their folder ids, so the folders come back once the file is fixed.
+                log.warning("Ignoring %s: it does not hold valid folders", self.path.name)
+                return
+            self._folders = folders
+
+    def _save(self) -> None:
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps(self._folders, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, self.path)
+
+    def list(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            items = [{"id": key, "name": f["name"]} for key, f in self._folders.items()]
+        return sorted(items, key=lambda f: f["name"].casefold())
+
+    def exists(self, folder_id: Optional[str]) -> bool:
+        with self._lock:
+            return folder_id in self._folders
+
+    def _taken(self, name: str, other_than: Optional[str] = None) -> bool:
+        return any(
+            f["name"].casefold() == name.casefold()
+            for key, f in self._folders.items() if key != other_than
+        )
+
+    def add(self, name: str) -> str:
+        """Creates a folder and returns its id; raises ValueError with text for the user."""
+        with self._lock:
+            if len(self._folders) >= FOLDERS_MAX:
+                raise ValueError("Тек може бути щонайбільше %d" % FOLDERS_MAX)
+            if self._taken(name):
+                raise ValueError("Така тека вже є")
+            folder_id = secrets.token_hex(6)
+            self._folders[folder_id] = {"name": name, "created": time.time()}
+            self._save()
+            return folder_id
+
+    def rename(self, folder_id: str, name: str) -> bool:
+        """False if there is no such folder; ValueError if the name is taken."""
+        with self._lock:
+            if folder_id not in self._folders:
+                return False
+            if self._taken(name, other_than=folder_id):
+                raise ValueError("Така тека вже є")
+            self._folders[folder_id]["name"] = name
+            self._save()
+            return True
+
+    def remove(self, folder_id: str) -> bool:
+        with self._lock:
+            if folder_id not in self._folders:
+                return False
+            del self._folders[folder_id]
+            self._save()
+            return True
+
+
+def clean_folder_name(raw: str) -> str:
+    """A folder name as typed, tidied up; ValueError with text for the user if it cannot be one."""
+    name = " ".join("".join(ch for ch in raw if ch.isprintable()).split())
+    if not name:
+        raise ValueError("Назва теки не може бути порожньою")
+    if len(name) > FOLDER_NAME_MAX:
+        raise ValueError("Назва теки задовга: щонайбільше %d символів" % FOLDER_NAME_MAX)
+    return name
+
+
 class QueueStore:
     """The shared watch queue of the projector: what plays next, in order, in a JSON file.
 
@@ -1020,6 +1179,14 @@ class VideoIds(BaseModel):
     ids: List[str]
 
 
+class FolderName(BaseModel):
+    name: str
+
+
+class VideoFolder(BaseModel):
+    folder: Optional[str] = None
+
+
 class QueueAdd(BaseModel):
     video_id: str
 
@@ -1108,6 +1275,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     sessions = SessionStore(settings.data_dir / "sessions.json")
     devices = DeviceStore(settings.data_dir / "devices.json")
     queue = QueueStore(settings.data_dir / "queue.json")
+    folders = FolderStore(settings.data_dir / "folders.json")
     pairing = Pairing()
     limiter = LoginLimiter()
     pair_start_limiter = LoginLimiter(PAIR_STARTS_PER_WINDOW, PAIR_CODE_TTL)
@@ -1139,6 +1307,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         sessions.load()
         devices.load()
         queue.load()
+        folders.load()
         await transcoder.start()
         yield
         await transcoder.stop()
@@ -1153,6 +1322,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.state.hub = hub
     app.state.devices = devices
     app.state.queue = queue
+    app.state.folders = folders
     app.state.pairing = pairing
     app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
@@ -1448,6 +1618,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     def public(item: Dict[str, Any]) -> Dict[str, Any]:
         data = {key: item.get(key) for key in PUBLIC_KEYS}
+        # A folder that is gone (deleted, or its file damaged) reads as no folder.
+        if not folders.exists(data["folder"]):
+            data["folder"] = None
         if item["status"] == "processing":
             data["progress"] = transcoder.progress.get(item["id"], 0.0)
         return data
@@ -1459,8 +1632,13 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @router.get("/api/videos")
     async def list_videos() -> Dict[str, Any]:
         usage = shutil.disk_usage(settings.data_dir)
+        videos = [public(item) for item in store.list()]
+        counts: Dict[Optional[str], int] = {}
+        for video in videos:
+            counts[video["folder"]] = counts.get(video["folder"], 0) + 1
         return {
-            "videos": [public(item) for item in store.list()],
+            "videos": videos,
+            "folders": [dict(f, count=counts.get(f["id"], 0)) for f in folders.list()],
             "disk": {"free": usage.free, "total": usage.total},
             "max_upload": settings.max_upload_bytes,
         }
@@ -1468,6 +1646,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @member.post("/api/videos", status_code=201)
     async def upload_video(request: Request) -> Dict[str, Any]:
         name = clean_name(request.headers.get("x-filename", ""))
+        # The folder the phone is looking at; one deleted meanwhile means no folder.
+        folder = request.headers.get("x-folder") or None
+        if not folders.exists(folder):
+            folder = None
         ext = Path(name).suffix.lower()
         if ext not in ALLOWED_EXT:
             raise HTTPException(415, "Підтримуються лише відео MP4, MOV, M4V, MKV, WebM і 3GP")
@@ -1517,6 +1699,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             "duration": None,
             "thumb": False,
             "error": None,
+            "folder": folder,
         }
         store.add(item)
         transcoder.enqueue(video_id)
@@ -1583,6 +1766,54 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if queue.remove_videos(gone):
             await queue_changed()
         return {"deleted": deleted, "missing": [i for i in ids if i not in gone]}
+
+    # ----------------------------------------------------------------- folders
+
+    def folder_name(raw: str) -> str:
+        try:
+            return clean_folder_name(raw)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    @member.post("/api/folders", status_code=201)
+    async def create_folder(body: FolderName) -> Dict[str, Any]:
+        name = folder_name(body.name)
+        try:
+            folder_id = folders.add(name)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        return {"id": folder_id, "name": name}
+
+    @member.patch("/api/folders/{folder_id}")
+    async def rename_folder(folder_id: str, body: FolderName) -> Dict[str, Any]:
+        name = folder_name(body.name)
+        try:
+            if not folders.rename(folder_id, name):
+                raise HTTPException(404, "Теку не знайдено")
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        return {"id": folder_id, "name": name}
+
+    @member.delete("/api/folders/{folder_id}", status_code=204)
+    async def delete_folder(folder_id: str) -> Response:
+        """Deletes a folder; its videos stay in the library without a folder."""
+        if not folders.remove(folder_id):
+            raise HTTPException(404, "Теку не знайдено")
+        for item in store.list():
+            if item.get("folder") == folder_id:
+                store.update(item["id"], folder=None)
+        return Response(status_code=204)
+
+    @member.post("/api/videos/{video_id}/folder")
+    async def move_video(video_id: str, body: VideoFolder) -> Dict[str, Any]:
+        if body.folder is not None and not folders.exists(body.folder):
+            raise HTTPException(404, "Теку не знайдено")
+        if not store.update(video_id, folder=body.folder):
+            raise HTTPException(404, "Відео не знайдено")
+        item = store.get(video_id)
+        if item is None:  # deleted a moment ago
+            raise HTTPException(404, "Відео не знайдено")
+        return public(item)
 
     # ------------------------------------------------------------- watch queue
 

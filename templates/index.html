@@ -258,7 +258,9 @@
     padding: 8px 8px 8px 16px;
     padding-top: calc(8px + env(safe-area-inset-top));
   }
-  #player-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  .player-head { flex: 1; min-width: 0; }
+  #player-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  #player-info { display: block; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #player-close { padding: 0 16px; }
 
   /* ---------- compact card grid ---------- */
@@ -306,9 +308,46 @@
   }
   details.menu .pop { right: 0; top: 44px; min-width: 140px; }
 
+  /* ---------- video quality ---------- */
+  .quality {
+    position: absolute; left: 6px; bottom: 6px; padding: 1px 6px; border-radius: 6px;
+    background: rgba(15, 17, 21, 0.8); font-size: 12px; font-weight: 700; letter-spacing: 0.02em;
+  }
+  .quality.hd { color: var(--accent); }
+  body.selecting .quality { display: none; }
+
+  /* ---------- folders ---------- */
+  #folders {
+    display: flex; gap: 8px; margin: 0 -16px 12px; padding: 0 16px 4px;
+    overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch;
+  }
+  #folders::-webkit-scrollbar { display: none; }
+  .chip {
+    flex: none; min-height: 40px; padding: 0 14px; border-radius: 20px;
+    background: transparent; color: var(--text); border-color: var(--line);
+    font-size: 14px; white-space: nowrap;
+  }
+  .chip .n { color: var(--muted); font-weight: 400; margin-left: 4px; }
+  .chip[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+  .chip[aria-pressed="true"] .n { color: var(--on-accent); opacity: 0.7; }
+  .chip.add { color: var(--muted); border-style: dashed; }
+  #folder-tools { display: flex; gap: 8px; margin: -4px 0 12px; }
+  #folder-tools button { min-height: 40px; padding: 0 14px; font-size: 14px; }
+  details.menu .pop button.neutral { color: var(--text); }
+  #move-dialog {
+    width: min(360px, calc(100vw - 32px)); padding: 16px; border: 1px solid var(--line);
+    border-radius: var(--radius); background: var(--panel); color: var(--text);
+  }
+  #move-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+  #move-dialog h2 { margin: 0 0 12px; font-size: 16px; overflow-wrap: anywhere; }
+  #move-options { display: grid; gap: 8px; max-height: 50vh; overflow-y: auto; }
+  #move-options button { text-align: left; padding: 0 16px; }
+  #move-options button[aria-current="true"] { border-color: var(--accent); }
+  #move-cancel { width: 100%; margin-top: 12px; }
+
   /* ---------- watch queue ---------- */
-  .actions { gap: 6px; }
-  .actions .queue-add { flex: none; width: 40px; padding: 0; }
+  .actions { gap: 4px; }
+  .actions .queue-add { flex: none; width: 36px; padding: 0; }
   .actions button.primary { padding: 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .actions .queue-add svg { width: 22px; height: 22px; fill: currentColor; }
   #queue {
@@ -386,14 +425,6 @@
   </div>
   <p id="message" role="alert"></p>
   <p id="disk" hidden></p>
-  <div id="select-bar" hidden>
-    <button id="select-start" class="outline" type="button">Вибрати кілька</button>
-    <span id="select-count" hidden></span>
-    <button id="select-all" class="outline" type="button" hidden>Усі</button>
-    <button id="select-delete" class="danger-btn" type="button" hidden disabled>Видалити</button>
-    <button id="select-cancel" class="outline" type="button" hidden>Скасувати</button>
-  </div>
-
   <section id="queue" hidden aria-label="Черга перегляду">
     <div class="queue-head">
       <h2 id="queue-title">Черга</h2>
@@ -403,7 +434,26 @@
     <ol id="queue-list"></ol>
   </section>
 
+  <nav id="folders" aria-label="Теки" hidden></nav>
+  <div id="folder-tools" hidden>
+    <button id="folder-rename" class="outline" type="button">Перейменувати теку</button>
+    <button id="folder-delete" class="outline" type="button">Видалити теку</button>
+  </div>
+  <div id="select-bar" hidden>
+    <button id="select-start" class="outline" type="button">Вибрати кілька</button>
+    <span id="select-count" hidden></span>
+    <button id="select-all" class="outline" type="button" hidden>Усі</button>
+    <button id="select-delete" class="danger-btn" type="button" hidden disabled>Видалити</button>
+    <button id="select-cancel" class="outline" type="button" hidden>Скасувати</button>
+  </div>
+
   <section id="list" aria-live="polite"></section>
+
+  <dialog id="move-dialog" aria-labelledby="move-title">
+    <h2 id="move-title"></h2>
+    <div id="move-options"></div>
+    <button id="move-cancel" class="outline" type="button">Скасувати</button>
+  </dialog>
 
   <footer>
     <span class="who" id="who"></span>
@@ -456,7 +506,10 @@
 
 <div id="player" hidden>
   <div class="bar-top">
-    <span id="player-title"></span>
+    <div class="player-head">
+      <span id="player-title"></span>
+      <span id="player-info"></span>
+    </div>
     <button id="player-close" class="outline" type="button">Закрити</button>
   </div>
   <video id="video" controls playsinline></video>
@@ -496,6 +549,10 @@
   var ICON_DOWN = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.4 8.6 12 13.2l4.6-4.6L18 10l-6 6-6-6z"/></svg>';
   var ICON_REMOVE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18.3 7.1 16.9 5.7 12 10.6 7.1 5.7 5.7 7.1l4.9 4.9-4.9 4.9 1.4 1.4 4.9-4.9 4.9 4.9 1.4-1.4-4.9-4.9z"/></svg>';
   var queue = [];  // what the projector plays next; the server sends it over the WebSocket
+  var folders = [];        // [{id, name, count}]
+  var FOLDER_KEY = 'promin.folder';
+  var currentFolder = 'all';  // 'all', 'none' or a folder id; remembered on this phone
+  try { currentFolder = localStorage.getItem(FOLDER_KEY) || 'all'; } catch (e) {}
 
   function formatSize(bytes) {
     if (bytes < 1048576) return Math.max(1, Math.round(bytes / 1024)) + ' КБ';
@@ -513,6 +570,35 @@
     var tail = (sec < 10 ? '0' : '') + sec;
     if (h) return h + ':' + (m < 10 ? '0' : '') + m + ':' + tail;
     return m + ':' + tail;
+  }
+
+  // Quality of a finished video, from what the server read off the file.
+  function qualityLabel(info) {
+    var short = Math.min(info.width, info.height);  // a vertical 1080×1920 video is 1080p too
+    var label = short >= 2000 ? '4K' : short >= 1400 ? '1440p' : short >= 1000 ? '1080p' : short >= 700 ? '720p' : 'SD';
+    if (info.fps >= 48) label += Math.round(info.fps);
+    return label;
+  }
+
+  function formatBitrate(kbps) {
+    if (kbps >= 1000) return (kbps / 1000).toFixed(1).replace('.', ',') + ' Мбіт/с';
+    return kbps + ' кбіт/с';
+  }
+
+  var CODEC_NAMES = { h264: 'H.264', hevc: 'HEVC', aac: 'AAC', mp3: 'MP3', ac3: 'AC3' };
+
+  function qualityDetails(info) {
+    var parts = [info.width + '×' + info.height];
+    if (info.fps) parts.push(String(Math.round(info.fps * 100) / 100).replace('.', ',') + ' кадрів/с');
+    if (info.bitrate_kbps) parts.push(formatBitrate(info.bitrate_kbps));
+    if (info.video_codec) parts.push(CODEC_NAMES[info.video_codec] || info.video_codec);
+    if (info.audio_codec) {
+      var layout = info.channels === 1 ? 'моно' : info.channels === 2 ? 'стерео' : info.channels + ' кан.';
+      parts.push('звук ' + (CODEC_NAMES[info.audio_codec] || info.audio_codec) + ' ' + layout);
+    } else {
+      parts.push('без звуку');
+    }
+    return parts.join(' · ');
   }
 
   function statusText(item) {
@@ -573,6 +659,12 @@
       thumb.appendChild(play);
     }
     if (item.duration) thumb.appendChild(el('span', 'duration', formatDuration(item.duration)));
+    if (ready && item.info && item.info.width) {
+      var label = qualityLabel(item.info);
+      var badge = el('span', 'quality' + (label === 'SD' ? '' : ' hd'), label);
+      badge.title = qualityDetails(item.info);
+      thumb.appendChild(badge);
+    }
     if (selecting) {
       var check = el('span', 'check');
       check.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 16.6 4.9 12l-1.4 1.4 6 6 11-11-1.4-1.4z"/></svg>';
@@ -590,6 +682,15 @@
       summary.setAttribute('aria-label', 'Меню відео: ' + item.name);
       menu.appendChild(summary);
       var pop = el('div', 'pop');
+      if (folders.length) {
+        var moveBtn = el('button', 'neutral', 'Перенести в теку');
+        moveBtn.type = 'button';
+        moveBtn.addEventListener('click', function () {
+          menu.open = false;
+          openMoveDialog(item);
+        });
+        pop.appendChild(moveBtn);
+      }
       var del = el('button', null, 'Видалити');
       del.type = 'button';
       del.addEventListener('click', function () {
@@ -605,7 +706,13 @@
     var name = el('div', 'name', displayName(item.name));
     name.title = item.name;
     body.appendChild(name);
-    body.appendChild(el('div', 'meta', formatSize(item.size) + ' · ' + statusText(item)));
+    // A finished video says how heavy it is; one in progress says where it is.
+    var metaText = ready && item.info && item.info.bitrate_kbps
+      ? formatBitrate(item.info.bitrate_kbps)
+      : statusText(item);
+    var meta = el('div', 'meta', formatSize(item.size) + ' · ' + metaText);
+    if (ready && item.info) meta.title = qualityDetails(item.info);
+    body.appendChild(meta);
 
     if (item.status === 'processing') {
       var track = el('div', 'track');
@@ -661,7 +768,7 @@
 
   function renderList() {
     // Do not redraw an unchanged list, so that an open menu stays open.
-    var snapshot = JSON.stringify([videosCache, canCast(), selecting, selected]);
+    var snapshot = JSON.stringify([videosCache, folders, currentFolder, canCast(), selecting, selected]);
     if (snapshot === lastRendered) return;
     lastRendered = snapshot;
     list.textContent = '';
@@ -669,8 +776,149 @@
       list.appendChild(el('div', 'empty', 'Тут з’являться ваші відео'));
       return;
     }
-    videosCache.forEach(function (item) { list.appendChild(renderCard(item)); });
+    var shown = visibleVideos();
+    if (!shown.length) {
+      list.appendChild(el('div', 'empty', currentFolder === 'none'
+        ? 'Усі відео розкладено по теках'
+        : 'У цій теці поки немає відео. Перенесіть сюди відео через меню «⋯» на картці або завантажте нове.'));
+      return;
+    }
+    shown.forEach(function (item) { list.appendChild(renderCard(item)); });
   }
+
+  // ----------------------------------------------------------------- folders
+
+  function visibleVideos() {
+    if (currentFolder === 'all') return videosCache;
+    var wanted = currentFolder === 'none' ? null : currentFolder;
+    return videosCache.filter(function (v) { return (v.folder || null) === wanted; });
+  }
+
+  function folderById(id) {
+    for (var i = 0; i < folders.length; i++) if (folders[i].id === id) return folders[i];
+    return null;
+  }
+
+  function setFolder(id) {
+    currentFolder = id;
+    try { localStorage.setItem(FOLDER_KEY, id); } catch (e) {}
+    if (selecting) setSelecting(false);
+    renderFolders();
+    renderList();
+    if (isAdmin) updateSelectBar();
+  }
+
+  function chip(label, count, id, extraClass) {
+    var button = el('button', 'chip' + (extraClass ? ' ' + extraClass : ''), label);
+    button.type = 'button';
+    if (count != null) button.appendChild(el('span', 'n', String(count)));
+    if (id != null) {
+      button.setAttribute('aria-pressed', String(currentFolder === id));
+      button.addEventListener('click', function () { setFolder(id); });
+    }
+    return button;
+  }
+
+  function renderFolders() {
+    var nav = document.getElementById('folders');
+    // Without folders the bar would only say "all": it appears once there is a folder,
+    // or straight away for people who can create one.
+    nav.hidden = !folders.length && !canManage;
+    nav.textContent = '';
+    if (!nav.hidden) {
+      nav.appendChild(chip('Усі', videosCache.length, 'all'));
+      folders.forEach(function (f) { nav.appendChild(chip(f.name, f.count, f.id)); });
+      var loose = videosCache.filter(function (v) { return !v.folder; }).length;
+      if (folders.length) nav.appendChild(chip('Без теки', loose, 'none'));
+      if (canManage) {
+        var add = chip('+ Тека', null, null, 'add');
+        add.setAttribute('aria-label', 'Нова тека');
+        add.addEventListener('click', createFolder);
+        nav.appendChild(add);
+      }
+    }
+    var folder = folderById(currentFolder);
+    document.getElementById('folder-tools').hidden = !(folder && canManage);
+    uploadBtn.textContent = folder ? 'Завантажити в «' + folder.name + '»' : 'Завантажити відео';
+  }
+
+  function folderRequest(method, url, body) {
+    message.textContent = '';
+    var options = { method: method, headers: {} };
+    if (body) {
+      options.headers['Content-Type'] = 'application/json';
+      options.body = JSON.stringify(body);
+    }
+    return fetch(url, options).then(function (r) {
+      if (r.status === 401) { location.href = '/login'; throw new Error('login'); }
+      if (!r.ok) {
+        return r.text().then(function (text) {
+          throw new Error(errorText(text, 'Не вдалося змінити теки.'));
+        });
+      }
+      return r.status === 204 ? null : r.json();
+    }).catch(function (error) {
+      if (error.message !== 'login') {
+        message.textContent = error.message === 'Failed to fetch'
+          ? 'Немає зв’язку із сервером. Спробуйте ще раз.' : error.message;
+      }
+      throw error;
+    });
+  }
+
+  function createFolder() {
+    var name = prompt('Назва нової теки:');
+    if (name == null || !name.trim()) return;
+    folderRequest('POST', '/api/folders', { name: name }).then(function (folder) {
+      return refresh().then(function () { setFolder(folder.id); });
+    }, function () {});
+  }
+
+  document.getElementById('folder-rename').addEventListener('click', function () {
+    var folder = folderById(currentFolder);
+    if (!folder) return;
+    var name = prompt('Нова назва теки:', folder.name);
+    if (name == null || !name.trim() || name.trim() === folder.name) return;
+    folderRequest('PATCH', '/api/folders/' + folder.id, { name: name }).then(refresh, function () {});
+  });
+
+  document.getElementById('folder-delete').addEventListener('click', function () {
+    var folder = folderById(currentFolder);
+    if (!folder) return;
+    if (!confirm('Видалити теку «' + folder.name + '»? Відео з неї не видаляться, а залишаться без теки.')) return;
+    folderRequest('DELETE', '/api/folders/' + folder.id).then(function () {
+      setFolder('all');
+      return refresh();
+    }, function () {});
+  });
+
+  var moveDialog = document.getElementById('move-dialog');
+
+  function openMoveDialog(item) {
+    document.getElementById('move-title').textContent = 'Перенести «' + displayName(item.name) + '»';
+    var options = document.getElementById('move-options');
+    options.textContent = '';
+    var choices = folders.map(function (f) { return { id: f.id, name: f.name }; });
+    choices.push({ id: null, name: 'Без теки' });
+    choices.forEach(function (choice) {
+      var here = (item.folder || null) === choice.id;
+      var button = el('button', 'outline', choice.name + (here ? ' · тут' : ''));
+      button.type = 'button';
+      button.disabled = here;
+      if (here) button.setAttribute('aria-current', 'true');
+      button.addEventListener('click', function () {
+        moveDialog.close();
+        folderRequest('POST', '/api/videos/' + item.id + '/folder', { folder: choice.id })
+          .then(refresh, function () {});
+      });
+      options.appendChild(button);
+    });
+    moveDialog.showModal();
+  }
+
+  document.getElementById('move-cancel').addEventListener('click', function () { moveDialog.close(); });
+  // A tap on the dimmed background closes the dialog too.
+  moveDialog.addEventListener('click', function (e) { if (e.target === moveDialog) moveDialog.close(); });
 
   // ------------------------------------------------------------- watch queue
 
@@ -769,20 +1017,20 @@
   // ------------------------------------------------- selecting several videos
 
   function selectedIds() {
-    return videosCache.filter(function (v) { return selected[v.id]; }).map(function (v) { return v.id; });
+    return visibleVideos().filter(function (v) { return selected[v.id]; }).map(function (v) { return v.id; });
   }
 
   function updateSelectBar() {
     var count = selectedIds().length;
     document.body.classList.toggle('selecting', selecting);
-    document.getElementById('select-start').hidden = selecting || !videosCache.length;
+    document.getElementById('select-start').hidden = selecting || !visibleVideos().length;
     ['select-count', 'select-all', 'select-delete', 'select-cancel'].forEach(function (id) {
       document.getElementById(id).hidden = !selecting;
     });
     document.getElementById('select-count').textContent = 'Вибрано: ' + count;
     document.getElementById('select-delete').disabled = !count;
     document.getElementById('select-all').textContent =
-      count && count === videosCache.length ? 'Зняти всі' : 'Усі';
+      count && count === visibleVideos().length ? 'Зняти всі' : 'Усі';
   }
 
   function setSelecting(on) {
@@ -836,9 +1084,9 @@
   document.getElementById('select-cancel').addEventListener('click', function () { setSelecting(false); });
   document.getElementById('select-delete').addEventListener('click', deleteSelected);
   document.getElementById('select-all').addEventListener('click', function () {
-    var all = selectedIds().length === videosCache.length;
+    var all = selectedIds().length === visibleVideos().length;
     selected = {};
-    if (!all) videosCache.forEach(function (v) { selected[v.id] = true; });
+    if (!all) visibleVideos().forEach(function (v) { selected[v.id] = true; });
     renderList();
     updateSelectBar();
   });
@@ -1046,6 +1294,13 @@
         disk.textContent = 'Вільно на сервері: ' + formatSize(data.disk.free);
         schedule(data);
         videosCache = data.videos;
+        folders = data.folders || [];
+        // A folder deleted elsewhere: back to all videos.
+        if (currentFolder !== 'all' && currentFolder !== 'none' && !folderById(currentFolder)) {
+          currentFolder = 'all';
+        }
+        if (currentFolder === 'none' && !folders.length) currentFolder = 'all';
+        renderFolders();
         // Videos deleted elsewhere drop out of the selection.
         var present = {};
         videosCache.forEach(function (v) { present[v.id] = true; });
@@ -1089,6 +1344,7 @@
     var xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/videos');
     xhr.setRequestHeader('X-Filename', encodeURIComponent(file.name));
+    if (folderById(currentFolder)) xhr.setRequestHeader('X-Folder', currentFolder);
     xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
     xhr.upload.onprogress = function (e) {
       if (!e.lengthComputable) return;
@@ -1132,6 +1388,7 @@
 
   function openPlayer(item) {
     playerTitle.textContent = item.name;
+    document.getElementById('player-info').textContent = item.info ? qualityDetails(item.info) : '';
     video.src = '/media/' + item.id;
     player.hidden = false;
     var started = video.play();

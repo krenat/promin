@@ -18,6 +18,7 @@ The interface is in Ukrainian.
 - automatic transcoding with ffmpeg to 1080p H.264;
 - a `/tv` page for the projector's browser and a `/` page for the phone;
 - playback on the projector controlled from the phone over WebSocket;
+- folders, one level deep;
 - a shared watch queue: the projector plays the next video by itself;
 - users with roles, and projectors paired with a code instead of a password.
 
@@ -54,6 +55,14 @@ docker compose up -d --build
 ## Configuration
 
 All settings are environment variables; `.env.example` lists and describes them. The service does not start without `PROMIN_TOKEN` (at least 12 characters).
+
+## Folders
+
+- Folders are one level deep, and a video is in at most one folder.
+- The row of folders above the list filters it: all videos, one folder, or videos without a folder. The phone remembers the last choice.
+- Create a folder with the plus at the end of the row; rename or delete the folder that is open with the buttons under the row. Deleting a folder keeps its videos: they stay in the library without a folder.
+- Move a video with "move to folder" in its card menu. A video uploaded while a folder is open goes into that folder.
+- Any user with a login manages folders; a paired projector cannot.
 
 ## Encoding settings
 
@@ -102,6 +111,7 @@ Any user chooses how new videos are encoded on the `/settings` page: the largest
 - Everything else is transcoded to H.264 High within those limits, with a bitrate cap, a keyframe every 2 seconds and AAC audio; HDR is converted to SDR.
 - The original's metadata (including location) does not reach the finished file.
 - The original is deleted after successful processing.
+- Each finished video shows its quality: a badge on the thumbnail (SD, 720p, 1080p, 1440p or 4K, with the frame rate from 48 frames per second up, such as 1080p60), the bitrate on the card, and the full details (frame size, frame rate, bitrate, codecs, audio channels) above the player. Videos processed before this was added get it on the next start of the service.
 
 ## License
 
