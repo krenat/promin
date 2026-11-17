@@ -143,10 +143,32 @@ def test_everything_else_is_transcoded(video):
     assert plan_encode(fake_probe(**video), SETTINGS)["mode"] == "transcode"
 
 
-def test_non_aac_audio_is_transcoded():
+def test_only_audio_is_transcoded_when_video_already_fits():
     probe = fake_probe()
-    probe["streams"][1]["codec_name"] = "opus"
+    probe["streams"][1]["codec_name"] = "ac3"
+    assert plan_encode(probe, SETTINGS)["mode"] == "audio"
+    # AAC 5.1 теж зводимо до стерео, не чіпаючи картинку.
+    surround = fake_probe()
+    surround["streams"][1]["channels"] = 6
+    assert plan_encode(surround, SETTINGS)["mode"] == "audio"
+
+
+def test_unfit_video_is_fully_transcoded_whatever_the_audio():
+    probe = fake_probe(codec_name="hevc")
+    probe["streams"][1]["codec_name"] = "ac3"
     assert plan_encode(probe, SETTINGS)["mode"] == "transcode"
+
+
+def test_audio_only_args_copy_video():
+    probe = fake_probe()
+    probe["streams"][1]["codec_name"] = "ac3"
+    plan = plan_encode(probe, SETTINGS)
+    args = build_ffmpeg_args("ffmpeg", Path("in.mkv"), Path("out.mp4"), plan, SETTINGS, None)
+    assert args[args.index("-c:v") + 1] == "copy"
+    assert args[args.index("-c:a") + 1] == "aac"
+    assert args[args.index("-ac") + 1] == "2"
+    assert "-vf" not in args and "libx264" not in args
+    assert "+faststart" in args
 
 
 def test_file_without_video_is_rejected():
@@ -864,3 +886,44 @@ def test_old_thumbnails_are_remade_on_start(tmp_path, small_clip):
 def test_tv_page_asks_for_fullscreen_on_start(anon):
     page = anon.get("/tv").text
     assert "requestFullscreen" in page and "webkitRequestFullscreen" in page
+
+
+# ------------------------------------------------------- перекодування лише звуку
+
+
+def stream_md5(path: Path, stream: str) -> str:
+    """Контрольна сума доріжки без перекодування: однакова, якщо доріжку скопійовано."""
+    return subprocess.run(
+        [FFMPEG, "-v", "error", "-i", str(path), "-map", stream, "-c", "copy", "-f", "md5", "-"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+@needs_ffmpeg
+def test_surround_ac3_audio_is_converted_without_touching_video(client, tmp_path, tmp_path_factory):
+    source = tmp_path_factory.mktemp("ac3") / "film.mkv"
+    subprocess.run(
+        [
+            FFMPEG, "-v", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25",
+            "-f", "lavfi", "-i", "anoisesrc=color=pink:sample_rate=48000",
+            "-t", "3", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "ac3", "-ac", "6", str(source),
+        ],
+        check=True,
+    )
+    created = upload(client, source.read_bytes(), name="film.mkv").json()
+    video = wait_done(client, created["id"])
+    assert video["status"] == "ready", video["error"]
+
+    ready = tmp_path / "videos" / (video["id"] + ".mp4")
+    audio = json.loads(subprocess.run(
+        [
+            shutil.which("ffprobe"), "-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=codec_name,channels", "-of", "json", str(ready),
+        ],
+        check=True, capture_output=True, text=True,
+    ).stdout)["streams"][0]
+    assert (audio["codec_name"], audio["channels"]) == ("aac", 2)
+    # Відеодоріжка та сама, біт у біт.
+    assert stream_md5(ready, "0:v:0") == stream_md5(source, "0:v:0")
