@@ -1,8 +1,8 @@
-"""Promin — домашній відеосервер для проектора.
+"""Promin, a home video server for a projector.
 
-Список відео, завантаження, перекодування, перегляд, видалення, користувачі з ролями
-і пульт: телефон керує сторінкою проектора через WebSocket. Проектор підключається
-кодом з екрана, який підтверджують на телефоні.
+Video list, upload, transcoding, playback, deletion, users with roles and a remote:
+the phone controls the projector page over WebSocket. The projector is paired with
+a code from its screen that is approved on the phone.
 """
 from __future__ import annotations
 
@@ -43,29 +43,29 @@ MB = 1024 * 1024
 ALLOWED_EXT = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".3gp"}
 PUBLIC_KEYS = ("id", "name", "size", "status", "created", "duration", "thumb", "thumb_v", "error")
 
-# Версія способу, яким зроблено мініатюру: після її зміни старі мініатюри перероблюються.
+# Version of the thumbnail method: after it changes, old thumbnails are remade.
 THUMB_VERSION = 2
 
 COOKIE_NAME = "promin_session"
 COOKIE_MAX_AGE = 365 * 24 * 3600
-# Сесія користувача завершується, якщо нею не користувалися стільки часу.
+# A user session ends after this long without use.
 SESSION_IDLE_TTL = 30 * 24 * 3600
-SESSION_TOUCH_EVERY = 24 * 3600  # як часто записувати, що сесією користувалися
+SESSION_TOUCH_EVERY = 24 * 3600  # how often to record that a session was used
 LOGIN_MAX_BODY = 4096
 MIN_TOKEN_LENGTH = 12
 
-# Куди можна повернути після входу і які команди пульт може слати проектору.
+# Where login may redirect to, and which commands the remote may send to the projector.
 LOGIN_NEXT = ("/", "/tv")
 REMOTE_ACTIONS = ("load", "play", "pause", "seek", "seek_by", "volume", "stop")
-WS_REPLACED = 4000  # сторінку проектора відкрито деінде
+WS_REPLACED = 4000  # the projector page was opened elsewhere
 WS_UNAUTHORIZED = 4401
 
-# Підключення проектора кодом: скільки живе код і скільки їх може чекати водночас.
+# Pairing a projector by code: how long a code lives and how many may wait at once.
 PAIR_CODE_TTL = 10 * 60
 PAIR_MAX_PENDING = 50
 PAIR_STARTS_PER_WINDOW = 10
 
-# Вбудований адміністратор: його пароль — це PROMIN_TOKEN, у файлі він не зберігається.
+# Built-in administrator: its password is PROMIN_TOKEN and is never stored in a file.
 ADMIN = "admin"
 ROLES = ("admin", "viewer")
 USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,31}$")
@@ -74,13 +74,13 @@ PBKDF2_ROUNDS = 200_000
 LOGIN_MAX_FAILURES = 5
 LOGIN_WINDOW_SECONDS = 15 * 60
 
-# Межі, у які має вписатися готове відео.
+# Limits the finished video has to fit into.
 MAX_WIDTH = 1920
 MAX_HEIGHT = 1080
 MAX_FPS = 60
-HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}  # PQ (HDR10) і HLG
+HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}  # PQ (HDR10) and HLG
 
-# Ланцюжки HDR → SDR. Перший потребує ffmpeg з libzimg, другий — нового swscale.
+# HDR → SDR chains. The first needs ffmpeg with libzimg, the second a recent swscale.
 HDR_FILTER_ZSCALE = (
     "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
     "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv"
@@ -98,7 +98,7 @@ class Settings:
     token: str = ""
     port: int = 8080
     max_upload_bytes: int = 4096 * MB
-    # Скільки вільного місця має лишитися на диску після завантаження.
+    # How much free disk space must remain after an upload.
     disk_reserve_bytes: int = 500 * MB
     max_bitrate_kbps: int = 8000
     x264_preset: str = "veryfast"
@@ -129,7 +129,7 @@ class Settings:
 
 
 class Store:
-    """Список відео у JSON-файлі. Запис під блокуванням і атомарний."""
+    """Video list in a JSON file. Writes are locked and atomic."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -182,11 +182,11 @@ class Store:
             return True
 
 
-# ---------------------------------------------------------------- перекодування
+# ------------------------------------------------------------------ transcoding
 
 
 class ProcessingError(Exception):
-    """Помилка обробки, текст якої показуємо користувачу."""
+    """A processing error whose text is shown to the user."""
 
 
 def parse_fps(value: Optional[str]) -> float:
@@ -208,11 +208,11 @@ def stream_rotation(stream: Dict[str, Any]) -> int:
 
 
 def plan_encode(probe: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
-    """За виводом ffprobe вирішує, скільки роботи потрібно.
+    """Decides from the ffprobe output how much work is needed.
 
-    remux — файл уже підходить, лише перепакувати;
-    audio — відео підходить, перекодувати тільки звук;
-    transcode — перекодувати все.
+    remux: the file already fits, only repackage it;
+    audio: the video fits, re-encode only the audio;
+    transcode: re-encode everything.
     """
     streams = probe.get("streams") or []
     video = next(
@@ -243,7 +243,7 @@ def plan_encode(probe: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
     bitrate = number(video.get("bit_rate"), fmt.get("bit_rate"))
     hdr = video.get("color_transfer") in HDR_TRANSFERS
 
-    # Відео не чіпаємо лише тоді, коли проектор точно зіграє його як є.
+    # Leave the video alone only when the projector is sure to play it as is.
     video_ok = (
         video.get("codec_name") == "h264"
         and video.get("pix_fmt") == "yuv420p"
@@ -254,7 +254,7 @@ def plan_encode(probe: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         and 0 < fps <= MAX_FPS + 0.5
         and 0 < bitrate <= settings.max_bitrate_kbps * 1000 * 1.25
     )
-    # Звук лишаємо як є, якщо це AAC моно або стерео.
+    # Keep the audio as is if it is mono or stereo AAC.
     audio_ok = audio is None or (
         audio.get("codec_name") == "aac" and int(audio.get("channels") or 2) <= 2
     )
@@ -285,17 +285,17 @@ def build_ffmpeg_args(
     if plan["mode"] == "remux":
         args += ["-c", "copy"]
     elif plan["mode"] == "audio":
-        # Картинка копіюється без втрат, перекодовується лише звук.
+        # The picture is copied losslessly; only the audio is re-encoded.
         args += ["-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-ac", "2"]
     else:
         tonemapped = bool(plan["hdr"] and hdr_filter)
-        # Вписати в 1920×1080 без збільшення; поворот ffmpeg застосовує сам.
+        # Fit into 1920×1080 without upscaling; ffmpeg applies rotation by itself.
         filters = [
             "scale=w='min(%d,iw)':h='min(%d,ih)'"
             ":force_original_aspect_ratio=decrease:force_divisible_by=2"
             % (MAX_WIDTH, MAX_HEIGHT)
         ]
-        # Tone mapping після зменшення: на 4K він утричі повільніший.
+        # Tone mapping goes after downscaling: on 4K it is three times slower.
         if tonemapped:
             filters.append(hdr_filter)
         if plan["fps"] > MAX_FPS + 0.5:
@@ -310,20 +310,20 @@ def build_ffmpeg_args(
             "-crf", "21",
             "-maxrate", "%dk" % rate,
             "-bufsize", "%dk" % (rate * 2),
-            # Ключовий кадр кожні 2 секунди — для швидкого перемотування.
+            # A keyframe every 2 seconds, for fast seeking.
             "-force_key_frames", "expr:gte(t,n_forced*2)",
             "-c:a", "aac", "-b:a", "160k", "-ac", "2",
         ]
         if tonemapped:
             args += ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"]
-    # Метадані прибираємо: у відео з телефона там буває геолокація.
+    # Strip metadata: phone videos often carry a location.
     args += ["-map_metadata", "-1", "-movflags", "+faststart"]
     args += ["-progress", "pipe:1", "-nostats", str(dst)]
     return args
 
 
 def detect_hdr_filter(ffmpeg: str) -> Optional[str]:
-    """Який ланцюжок HDR → SDR уміє встановлений ffmpeg."""
+    """Which HDR → SDR chain the installed ffmpeg supports."""
 
     def output(*args: str) -> str:
         try:
@@ -345,7 +345,7 @@ def detect_hdr_filter(ffmpeg: str) -> Optional[str]:
 
 
 class Transcoder:
-    """Черга з одним воркером: відео обробляються по одному."""
+    """A queue with a single worker: videos are processed one at a time."""
 
     def __init__(self, settings: Settings, store: Store) -> None:
         self.settings = settings
@@ -365,10 +365,10 @@ class Transcoder:
         if self.ffmpeg:
             self.hdr_filter = await asyncio.to_thread(detect_hdr_filter, self.ffmpeg)
             if self.hdr_filter is None:
-                log.warning("ffmpeg не вміє tone mapping: HDR-відео можуть бути блідими")
+                log.warning("ffmpeg cannot tone map: HDR videos may look washed out")
         else:
-            log.warning("ffmpeg не знайдено: відео не оброблятимуться")
-        # Завдання, які не встигли завершитися до перезапуску, повертаємо в чергу.
+            log.warning("ffmpeg not found: videos will not be processed")
+        # Jobs that did not finish before a restart go back to the queue.
         pending = [
             item for item in self.store.list() if item["status"] in ("queued", "processing")
         ]
@@ -386,7 +386,7 @@ class Transcoder:
                     await task
 
     async def _refresh_thumbnails(self) -> None:
-        """Перероблює мініатюри, зроблені старим способом (часто це був чорний кадр)."""
+        """Remakes thumbnails made the old way (often a black frame)."""
         if not self.ffmpeg:
             return
         for item in self.store.list():
@@ -400,7 +400,7 @@ class Transcoder:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                log.exception("Не вдалося переробити мініатюру %s", item["id"])
+                log.exception("Could not remake the thumbnail for %s", item["id"])
                 continue
             self.store.update(
                 item["id"], thumb=made or bool(item.get("thumb")), thumb_v=THUMB_VERSION
@@ -411,7 +411,7 @@ class Transcoder:
         self._queue.put_nowait(video_id)
 
     def cancel(self, video_id: str) -> None:
-        """Зупиняє ffmpeg, якщо він зараз обробляє це відео."""
+        """Stops ffmpeg if it is processing this video right now."""
         proc = self._current_proc
         if self._current_id == video_id and proc and proc.returncode is None:
             proc.kill()
@@ -424,8 +424,8 @@ class Transcoder:
                 await self._process(video_id)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # воркер не має падати через одне відео
-                log.exception("Не вдалося обробити %s", video_id)
+            except Exception as exc:  # one video must not bring the worker down
+                log.exception("Could not process %s", video_id)
                 self.store.update(video_id, status="error", error=str(exc)[-2000:])
 
     async def _process(self, video_id: str) -> None:
@@ -449,7 +449,7 @@ class Transcoder:
             args = build_ffmpeg_args(self.ffmpeg, src, tmp, plan, settings, self.hdr_filter)
             code, err = await self._ffmpeg(args, video_id, plan["duration"])
 
-            if self.store.get(video_id) is None:  # видалили під час обробки
+            if self.store.get(video_id) is None:  # deleted while processing
                 remove_files(settings, video_id)
                 return
             if code != 0:
@@ -469,10 +469,10 @@ class Transcoder:
             if not updated:
                 remove_files(settings, video_id)
                 return
-            src.unlink(missing_ok=True)  # оригінал лишається на телефоні
+            src.unlink(missing_ok=True)  # the original stays on the phone
         except ProcessingError as exc:
             tmp.unlink(missing_ok=True)
-            # Шляхи на сервері користувачу ні до чого.
+            # Server paths mean nothing to the user.
             text = str(exc).replace(str(src), item["name"]).replace(str(tmp), "готовий файл")
             self.store.update(video_id, status="error", error=text[-2000:])
         finally:
@@ -508,7 +508,7 @@ class Transcoder:
         try:
             async for raw in proc.stdout:
                 key, _, value = raw.decode(errors="replace").strip().partition("=")
-                # out_time_ms у ffmpeg теж у мікросекундах — історична особливість.
+                # ffmpeg's out_time_ms is in microseconds too, a historical quirk.
                 if key in ("out_time_us", "out_time_ms") and duration > 0:
                     with suppress(ValueError):
                         done = int(value) / 1_000_000 / duration
@@ -521,7 +521,7 @@ class Transcoder:
 
     @staticmethod
     async def _reap(proc: asyncio.subprocess.Process) -> None:
-        """Не лишає процес працювати, якщо обробку перервали."""
+        """Does not leave the process running if processing was interrupted."""
         if proc.returncode is None:
             proc.kill()
             await proc.wait()
@@ -545,9 +545,9 @@ class Transcoder:
 
 
 def thumbnail_args(ffmpeg: str, video: Path, out: Path, duration: float) -> List[str]:
-    """Кадр для мініатюри: не з самого початку, де часто чорний екран або заставка."""
+    """Thumbnail frame: not from the very start, which is often black or a title card."""
     if duration > 20:
-        # З десятої частини відео беремо найтиповіший кадр із двох секунд.
+        # Take the most representative frame of two seconds, a tenth of the way in.
         seek, filters = duration * 0.1, "thumbnail=50,scale=640:-2"
     else:
         seek, filters = min(1.0, duration / 2), "scale=640:-2"
@@ -558,7 +558,7 @@ def thumbnail_args(ffmpeg: str, video: Path, out: Path, duration: float) -> List
     ]
 
 
-# ------------------------------------------------------------------------- вхід
+# ------------------------------------------------------------------------ login
 
 
 class NotAuthenticated(Exception):
@@ -566,7 +566,7 @@ class NotAuthenticated(Exception):
 
 
 class LoginLimiter:
-    """Обмежує кількість невдалих спроб входу з однієї адреси."""
+    """Limits failed login attempts from one address."""
 
     def __init__(self, max_failures: int = LOGIN_MAX_FAILURES, window: float = LOGIN_WINDOW_SECONDS) -> None:
         self.max_failures = max_failures
@@ -586,13 +586,13 @@ class LoginLimiter:
         return len(self._recent(ip)) >= self.max_failures
 
     def fail(self, ip: str) -> float:
-        """Записує спробу й повертає її позначку, за якою спробу можна зняти."""
+        """Records an attempt and returns its stamp, by which it can be forgiven."""
         stamp = time.monotonic()
         self._failures.setdefault(ip, []).append(stamp)
         return stamp
 
     def forgive(self, ip: str, stamp: float) -> None:
-        """Знімає одну спробу (вона виявилася вдалою); решта невдач лишається."""
+        """Forgives one attempt (it turned out successful); other failures stay."""
         attempts = self._failures.get(ip)
         if attempts and stamp in attempts:
             attempts.remove(stamp)
@@ -609,7 +609,7 @@ def hash_password(password: str, salt: bytes) -> str:
 
 
 class UserStore:
-    """Користувачі у JSON-файлі; паролі лише у вигляді хешів."""
+    """Users in a JSON file; passwords are stored only as hashes."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -673,7 +673,7 @@ class UserStore:
 
 
 class SessionStore:
-    """Сесії користувачів. Зберігаємо лише хеш секрету з cookie."""
+    """User sessions. Only a hash of the cookie secret is stored."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -694,7 +694,7 @@ class SessionStore:
         os.replace(tmp, self.path)
 
     def add(self, username: str, fingerprint: str) -> str:
-        """Створює сесію і повертає значення її cookie. Заодно прибирає прострочені."""
+        """Creates a session and returns its cookie value. Also purges expired ones."""
         session_id = secrets.token_hex(8)
         secret = secrets.token_urlsafe(32)
         now = time.time()
@@ -732,7 +732,7 @@ class SessionStore:
 
 
 class DeviceStore:
-    """Підключені проектори. Зберігаємо лише хеш секрету з cookie пристрою."""
+    """Paired projectors. Only a hash of the device cookie secret is stored."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -753,7 +753,7 @@ class DeviceStore:
         os.replace(tmp, self.path)
 
     def add(self, name: str, approved_by: str) -> str:
-        """Створює пристрій і повертає значення його cookie."""
+        """Creates a device and returns its cookie value."""
         device_id = secrets.token_hex(8)
         secret = secrets.token_urlsafe(32)
         with self._lock:
@@ -789,10 +789,10 @@ class DeviceStore:
 
 
 class Pairing:
-    """Коди, які зараз показують проектори. Живуть лише в пам'яті."""
+    """Codes that projectors are showing right now. They live in memory only."""
 
     def __init__(self) -> None:
-        self.pending: Dict[str, Dict[str, Any]] = {}  # токен опитування → запис
+        self.pending: Dict[str, Dict[str, Any]] = {}  # polling token → entry
 
     def purge(self) -> None:
         cutoff = time.monotonic() - PAIR_CODE_TTL
@@ -837,11 +837,11 @@ class NewPassword(BaseModel):
     password: str
 
 
-# ------------------------------------------------------------------------ пульт
+# ----------------------------------------------------------------------- remote
 
 
 class Hub:
-    """Зв'язує пульти з проектором. Стан живе в пам'яті одного процесу."""
+    """Connects remotes to the projector. State lives in the memory of one process."""
 
     def __init__(self) -> None:
         self.tv: Optional[WebSocket] = None
@@ -850,7 +850,7 @@ class Hub:
 
     @staticmethod
     async def send(ws: WebSocket, message: Dict[str, Any]) -> None:
-        with suppress(Exception):  # з'єднання могло щойно обірватися
+        with suppress(Exception):  # the connection may have just dropped
             await ws.send_json(message)
 
     async def broadcast(self, message: Dict[str, Any]) -> None:
@@ -859,7 +859,7 @@ class Hub:
 
 
 def clean_state(message: Dict[str, Any]) -> Dict[str, Any]:
-    """Стан від сторінки проектора: лише відомі поля відомих типів."""
+    """State from the projector page: only known fields of known types."""
 
     def number(key: str) -> float:
         try:
@@ -881,11 +881,11 @@ def clean_state(message: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# ------------------------------------------------------------------- застосунок
+# ------------------------------------------------------------------ application
 
 
 def clean_name(raw: str) -> str:
-    """Назва для показу: без шляху, обмеженої довжини."""
+    """Display name: no path, limited length."""
     name = unquote(raw).replace("\\", "/").split("/")[-1].strip()
     return name[:200] or "video"
 
@@ -900,9 +900,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     settings = settings or Settings.from_env()
     if len(settings.token) < MIN_TOKEN_LENGTH:
         raise RuntimeError(
-            "Задайте PROMIN_TOKEN: щонайменше %d символів" % MIN_TOKEN_LENGTH
+            "Set PROMIN_TOKEN: at least %d characters" % MIN_TOKEN_LENGTH
         )
-    # Ключ для відбитків сесій; сам токен ні в cookie, ні у файли не потрапляє.
+    # Key for session fingerprints; the token itself never reaches a cookie or a file.
     secret = hmac.new(settings.token.encode("utf-8"), b"promin-session", "sha256").digest()
     users = UserStore(settings.data_dir / "users.json")
     sessions = SessionStore(settings.data_dir / "sessions.json")
@@ -919,7 +919,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         for folder in (settings.uploads_dir, settings.videos_dir, settings.thumbs_dir):
             folder.mkdir(parents=True, exist_ok=True)
-        # Недописані файли після перезапуску нікому не потрібні.
+        # Half-written files are useless after a restart.
         for leftover in list(settings.uploads_dir.glob("*.part")) + list(
             settings.videos_dir.glob("*.tmp.mp4")
         ):
@@ -944,7 +944,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
     def fingerprint(username: str) -> Optional[str]:
-        """Те, від чого залежить сесія: зміна пароля чи видалення її скасовує."""
+        """What a session depends on: a password change or deletion revokes it."""
         if username == ADMIN:
             source = "admin:" + settings.token
         else:
@@ -957,7 +957,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     def current_user(request: HTTPConnection) -> Optional[Dict[str, Any]]:
         raw = request.cookies.get(COOKIE_NAME, "")
-        if raw.startswith("@"):  # підключений проектор
+        if raw.startswith("@"):  # a paired projector
             device_id, _, secret = raw[1:].partition(".")
             device = devices.get(device_id)
             digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()
@@ -996,7 +996,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if username == ADMIN:
             return same(password, settings.token)
         user = users.get(username)
-        # Для невідомого імені теж рахуємо хеш, щоб відповідь не видавала, чи воно існує.
+        # Hash for an unknown name too, so the response does not reveal whether it exists.
         salt = bytes.fromhex(user["salt"]) if user else b"\0" * 16
         digest = await asyncio.to_thread(hash_password, password, salt)
         return user is not None and same(digest, user["hash"])
@@ -1029,10 +1029,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         ip = request.client.host if request.client else "unknown"
         if limiter.blocked(ip):
             return login_page("Забагато спроб. Спробуйте знову за 15 хвилин.", 429)
-        # Спробу рахуємо ще до перевірки пароля: між перевіркою ліміту й записом немає
-        # жодного await, тож паралельні запити ліміт не обходять.
+        # Count the attempt before checking the password: there is no await between the limit
+        # check and the record, so parallel requests cannot bypass the limit.
         attempt = limiter.fail(ip)
-        # Тіло читаємо потоком і зупиняємось на межі: Content-Length може бути відсутній.
+        # Read the body as a stream and stop at the limit: Content-Length may be missing.
         body = b""
         async for chunk in request.stream():
             body += chunk
@@ -1044,7 +1044,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         next_path = safe_next((form.get("next") or [""])[0])
         if not await check_password(username, password):
             return login_page("Неправильний логін або пароль.", 401, next_path)
-        # Вдалий вхід знімає лише власну спробу: попередні невдачі з цієї адреси лишаються.
+        # A successful login forgives only its own attempt: earlier failures stay.
         limiter.forgive(ip, attempt)
         cookie = sessions.add(username, fingerprint(username) or "")
         response = RedirectResponse(next_path, status_code=303)
@@ -1054,7 +1054,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         )
         return response
 
-    # Сторінка проектора відкрита всім: без входу вона лише показує код підключення.
+    # The projector page is open to everyone: without a login it only shows a pairing code.
     @app.get("/tv", response_class=HTMLResponse)
     async def tv_page() -> str:
         return (BASE_DIR / "templates" / "tv.html").read_text(encoding="utf-8")
@@ -1078,7 +1078,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             return JSONResponse({"status": "expired"})
         if entry["cookie"] is None:
             return JSONResponse({"status": "pending"})
-        # Код підтвердили на телефоні: видаємо проектору його cookie, код більше не діє.
+        # The code was approved on the phone: hand the projector its cookie; the code is spent.
         del pairing.pending[body.token]
         response = JSONResponse({"status": "approved"})
         response.set_cookie(
@@ -1088,7 +1088,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     @app.post("/logout")
     async def logout(request: Request) -> Response:
-        # Сесію прибираємо і на сервері: перехоплена cookie після виходу не діє.
+        # Drop the session on the server too: a stolen cookie stops working after logout.
         raw = request.cookies.get(COOKIE_NAME, "")
         if raw and not raw.startswith("@"):
             session_id, _, secret = raw.partition(".")
@@ -1100,7 +1100,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         response.delete_cookie(COOKIE_NAME)
         return response
 
-    # router — усім, хто увійшов (включно з відеофайлами); admin — лише адміністраторам.
+    # router: everyone who is logged in (video files included); admin: administrators only.
     router = APIRouter(dependencies=[Depends(require_auth)])
     admin = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -1131,7 +1131,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     async def delete_device(device_id: str) -> Response:
         if not devices.remove(device_id):
             raise HTTPException(404, "Пристрій не знайдено")
-        # Якщо цей проектор зараз на зв'язку, показ на ньому одразу припиняється.
+        # If this projector is connected right now, playback on it stops at once.
         tv = hub.tv
         if tv is not None and getattr(tv.state, "device_id", None) == device_id:
             with suppress(Exception):
@@ -1225,7 +1225,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if length > settings.max_upload_bytes:
             raise HTTPException(413, "Файл більший за дозволений розмір")
 
-        # Місце потрібне і на оригінал, і на готовий файл після перекодування.
+        # Space is needed for both the original and the transcoded file.
         free = shutil.disk_usage(settings.data_dir).free
         if free < length * 2 + settings.disk_reserve_bytes:
             raise HTTPException(507, "На сервері недостатньо вільного місця")
@@ -1285,7 +1285,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         path = settings.videos_dir / (video_id + ".mp4")
         if not item or item["status"] != "ready" or not path.is_file():
             raise HTTPException(404, "Відео не знайдено")
-        # FileResponse сам обробляє Range-запити, потрібні для перемотування.
+        # FileResponse handles Range requests itself; seeking needs them.
         return FileResponse(path, media_type="video/mp4")
 
     @router.get("/thumb/{video_id}")
@@ -1309,8 +1309,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @app.websocket("/ws")
     async def websocket(ws: WebSocket) -> None:
         role = ws.query_params.get("role")
-        # Браузер завжди називає сторінку, що відкриває з'єднання. Чужу (зокрема з іншого
-        # порту цього ж сервера, куди cookie теж потрапляє) не пускаємо.
+        # A browser always names the page that opens the connection. A foreign one (including
+        # another port of this server, which receives the cookie too) is refused.
         origin = ws.headers.get("origin")
         if origin is not None and urlsplit(origin).netloc != ws.headers.get("host"):
             await ws.close(code=1008)
@@ -1329,7 +1329,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             await ws.close(code=1008)
 
     async def serve_tv(ws: WebSocket) -> None:
-        # Проектор один: нове з'єднання стає активним, попереднє закривається.
+        # There is one projector: a new connection takes over and the previous one is closed.
         previous, hub.tv, hub.state = hub.tv, ws, None
         if previous is not None:
             with suppress(Exception):
@@ -1343,7 +1343,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     await hub.broadcast({"type": "state", **hub.state})
         except WebSocketDisconnect:
             pass
-        except Exception:  # сторінка надіслала щось, що не є JSON
+        except Exception:  # the page sent something that is not JSON
             with suppress(Exception):
                 await ws.close(code=1003)
         finally:
@@ -1398,5 +1398,5 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     app = create_app()
-    # Один процес: черга і стан пульта живуть у пам'яті.
+    # One process: the queue and the remote state live in memory.
     uvicorn.run(app, host="0.0.0.0", port=app.state.settings.port)

@@ -9,7 +9,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
-  /* Чисто чорний фон: чорне проектор не світить, тож смуги довкола відео зникають на стіні. */
+  /* Pure black background: a projector emits no light for black, so the bars around the video vanish on the wall. */
   html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
   body {
     color: #F2F0EA;
@@ -116,7 +116,7 @@
 </div>
 
 <script>
-/* Навмисно простий JavaScript без нових можливостей мови: браузер проектора може бути старим. */
+/* Deliberately plain JavaScript without newer language features: the projector browser may be old. */
 (function () {
   var video = document.getElementById('video');
   var bar = document.getElementById('bar');
@@ -130,15 +130,15 @@
   var PAIR_HINT = 'Відкрийте Promin на телефоні, натисніть «Підключити проектор» і введіть цей код';
 
   var ws = null;
-  var started = false;      // чи було натискання, яке дозволяє звук
-  var current = null;       // {id, name} відео, яке зараз показуємо
+  var started = false;      // whether there was a press that allows sound
+  var current = null;       // {id, name} of the video being shown
   var retryDelay = 1000;
   var retryTimer = null;
   var barTimer = null;
   var pointerTimer = null;
 
-  // Повноекранний режим браузер дозволяє лише у відповідь на натискання,
-  // тому входимо в нього від кнопки «Почати» і від будь-якого наступного натискання.
+  // The browser allows fullscreen only in response to a press, so we enter it
+  // from the start button and from any later press.
   function isFullscreen() {
     return !!(document.fullscreenElement || document.webkitFullscreenElement ||
               document.mozFullScreenElement || document.msFullscreenElement);
@@ -198,7 +198,7 @@
     var result = video.play();
     if (result && result['catch']) {
       result['catch'](function () {
-        // Браузер не дав грати зі звуком: потрібне ще одне натискання.
+        // The browser refused to play with sound: one more press is needed.
         if (video.paused && current) {
           started = false;
           showScreen('start');
@@ -282,7 +282,7 @@
     };
   }
 
-  // ------------------------------------------------------- підключення кодом
+  // ------------------------------------------------------- pairing by code
 
   function request(method, url, body, done) {
     var xhr = new XMLHttpRequest();
@@ -362,14 +362,14 @@
     connect();
   });
 
-  // Якщо з повноекранного режиму вийшли (наприклад, кнопкою «Назад»),
-  // будь-яке натискання чи клавіша OK на пульті повертає його.
+  // If fullscreen was left (with the Back button, for example),
+  // any press or the OK key on the remote brings it back.
   document.addEventListener('click', function () { if (started) enterFullscreen(); });
   document.addEventListener('keydown', function (event) {
     if (started && (event.keyCode === 13 || event.keyCode === 32)) enterFullscreen();
   });
 
-  // Курсор ховаємо, поки мишею не ворухнуть.
+  // The cursor stays hidden until the mouse moves.
   document.addEventListener('mousemove', function () {
     document.body.className = 'pointer';
     clearTimeout(pointerTimer);
@@ -378,7 +378,7 @@
 
   setInterval(sendState, 1000);
 
-  // Якщо цей екран уже підключений або тут увійшли з паролем — одразу до роботи.
+  // If this screen is already paired or someone logged in here with a password, start right away.
   request('GET', '/api/me', null, function (status) {
     if (status === 200) ready();
     else if (status === 401) startPairing();
