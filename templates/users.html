@@ -177,7 +177,9 @@
       top.appendChild(el('span', 'name', device.name));
       card.appendChild(top);
       var when = new Date(device.created * 1000).toLocaleDateString('uk-UA');
+      var seen = new Date(device.seen * 1000).toLocaleDateString('uk-UA');
       card.appendChild(el('div', 'note', 'Підключив ' + device.approved_by + ', ' + when));
+      card.appendChild(el('div', 'note', 'Востаннє на зв\'язку ' + seen));
       var actions = el('div', 'actions');
       var remove = el('button', 'danger', 'Відключити');
       remove.type = 'button';

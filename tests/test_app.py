@@ -400,7 +400,7 @@ def test_login_sets_long_lived_http_only_cookie(anon):
     cookie = r.headers["set-cookie"].lower()
     assert "httponly" in cookie
     assert "samesite=lax" in cookie
-    assert "max-age=31536000" in cookie
+    assert "max-age=2592000" in cookie
     assert TOKEN not in r.headers["set-cookie"]
     assert anon.get("/api/videos").status_code == 200
     assert anon.get("/login").status_code == 303  # already logged in
@@ -517,10 +517,21 @@ def test_idle_session_expires(anon):
     assert sessions.get(session_id) is None
 
 
+def test_opening_a_page_renews_the_cookie(anon):
+    cookie = sign_in(anon).cookies["promin_session"]
+    renewed = anon.get("/api/me").headers["set-cookie"].lower()
+    assert renewed.startswith("promin_session=" + cookie.lower())
+    assert "max-age=2592000" in renewed and "httponly" in renewed
+    # Without a login there is nothing to renew.
+    anon.cookies.clear()
+    assert "set-cookie" not in anon.get("/api/me").headers
+
+
 def test_changing_token_ends_admin_sessions(tmp_path):
     with make_client(tmp_path) as c:
-        assert c.get("/api/me").status_code == 200
+        # Read first: /api/me renews the cookie, and the test client then holds it twice.
         cookie = c.cookies["promin_session"]
+        assert c.get("/api/me").status_code == 200
     other = Settings(data_dir=tmp_path, token="another-token-1234567890")
     with TestClient(create_app(other)) as c:
         c.cookies.set("promin_session", cookie)
@@ -857,7 +868,7 @@ def test_projector_is_paired_by_qr_code(client, projector):
     r = projector.post("/api/pair/status", json={"token": pairing["token"]})
     assert r.json()["status"] == "approved"
     cookie = r.headers["set-cookie"].lower()
-    assert "httponly" in cookie and "max-age=31536000" in cookie
+    assert "httponly" in cookie and "max-age=2592000" in cookie
 
     me = projector.get("/api/me").json()
     assert me["role"] == "device"
@@ -918,6 +929,53 @@ def test_code_expires(client, projector):
     client.app.state.pairing.pending[pairing["token"]]["created"] -= 11 * 60
     assert client.post("/api/pair/approve", json=pair_key(pairing)).status_code == 404
     assert pair_status(projector, pairing["token"]) == "expired"
+
+
+def test_an_approval_nobody_collects_leaves_no_device(client, projector):
+    pairing = start_pairing(projector)
+    assert client.post("/api/pair/approve", json=pair_key(pairing)).status_code == 200
+    # The projector page was closed before it asked: nothing is paired yet.
+    assert client.get("/api/devices").json()["devices"] == []
+    client.app.state.pairing.pending[pairing["token"]]["created"] -= 11 * 60
+    assert pair_status(projector, pairing["token"]) == "expired"
+    assert client.get("/api/devices").json()["devices"] == []
+
+
+def test_an_idle_projector_is_forgotten(client, projector):
+    pairing = start_pairing(projector)
+    client.post("/api/pair/approve", json=pair_key(pairing))
+    assert pair_status(projector, pairing["token"]) == "approved"
+    devices = client.app.state.devices
+    device_id = client.get("/api/devices").json()["devices"][0]["id"]
+    # In touch within 30 days: the stamp is refreshed and the projector stays paired.
+    devices._devices[device_id]["seen"] -= 29 * 24 * 3600
+    assert projector.get("/api/me").status_code == 200
+    assert time.time() - client.get("/api/devices").json()["devices"][0]["seen"] < 60
+    # Silent for longer: it is gone from the list without ever coming back.
+    devices._devices[device_id]["seen"] -= 31 * 24 * 3600
+    assert client.get("/api/devices").json()["devices"] == []
+    assert projector.get("/api/me").status_code == 401
+
+
+def test_a_projector_paired_before_seen_was_recorded_counts_from_its_pairing(client, projector):
+    pairing = start_pairing(projector)
+    client.post("/api/pair/approve", json=pair_key(pairing))
+    pair_status(projector, pairing["token"])
+    devices = client.app.state.devices
+    device = next(iter(devices._devices.values()))
+    del device["seen"]
+    assert projector.get("/api/me").status_code == 200
+    device["created"] -= 31 * 24 * 3600
+    assert projector.get("/api/me").status_code == 401
+
+
+def test_a_failed_connection_is_logged(client, caplog):
+    with client.websocket_connect("/ws?role=remote") as ws:
+        ws.receive_json()
+        ws.send_text("not json")
+        with pytest.raises(Exception):
+            ws.receive_json()
+    assert "A remote connection failed" in caplog.text
 
 
 def test_approving_requires_a_logged_in_user(client, projector, viewer):

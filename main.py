@@ -52,9 +52,11 @@ PUBLIC_KEYS = (
 THUMB_VERSION = 2
 
 COOKIE_NAME = "promin_session"
-COOKIE_MAX_AGE = 365 * 24 * 3600
-# A user session ends after this long without use.
+# A user session ends after this long without use, and so does a paired projector.
 SESSION_IDLE_TTL = 30 * 24 * 3600
+DEVICE_IDLE_TTL = SESSION_IDLE_TTL
+# The browser keeps the cookie just as long; every page load renews it (see /api/me).
+COOKIE_MAX_AGE = SESSION_IDLE_TTL
 SESSION_TOUCH_EVERY = 24 * 3600  # how often to record that a session was used
 LOGIN_MAX_BODY = 4096
 BATCH_DELETE_MAX = 500
@@ -1186,7 +1188,11 @@ class QueueStore:
 
 
 class DeviceStore:
-    """Paired projectors. Only a hash of the device cookie secret is stored."""
+    """Paired projectors. Only a hash of the device cookie secret is stored.
+
+    A projector that has not been in touch for DEVICE_IDLE_TTL is forgotten: its cookie was
+    lost (cleared browser, a new pairing) or it is no longer used.
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -1197,23 +1203,47 @@ class DeviceStore:
         with self._lock:
             check = records("name", "hash", "approved_by", "created")
             self._devices = read_json(self.path, check) or {}
+            if self._purge():
+                self._save()
 
     def _save(self) -> None:
         write_json(self.path, self._devices, private=True)
+
+    @staticmethod
+    def seen(device: Dict[str, Any]) -> float:
+        """When the device was last in touch; one paired before this was recorded counts
+        from its pairing."""
+        return device.get("seen") or device["created"]
+
+    def _purge(self) -> bool:
+        cutoff = time.time() - DEVICE_IDLE_TTL
+        stale = [key for key, d in self._devices.items() if self.seen(d) < cutoff]
+        for key in stale:
+            del self._devices[key]
+        return bool(stale)
 
     def add(self, name: str, approved_by: str) -> str:
         """Creates a device and returns its cookie value."""
         device_id = secrets.token_hex(8)
         secret = secrets.token_urlsafe(32)
+        now = time.time()
         with self._lock:
+            self._purge()
             self._devices[device_id] = {
                 "name": name,
                 "hash": hashlib.sha256(secret.encode("utf-8")).hexdigest(),
                 "approved_by": approved_by,
-                "created": time.time(),
+                "created": now,
+                "seen": now,
             }
             self._save()
         return "@%s.%s" % (device_id, secret)
+
+    def touch(self, device_id: str) -> None:
+        with self._lock:
+            if device_id in self._devices:
+                self._devices[device_id]["seen"] = time.time()
+                self._save()
 
     def get(self, device_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -1222,8 +1252,13 @@ class DeviceStore:
 
     def list(self) -> List[Dict[str, Any]]:
         with self._lock:
+            if self._purge():
+                self._save()
             items = [
-                {"id": key, "name": d["name"], "approved_by": d["approved_by"], "created": d["created"]}
+                {
+                    "id": key, "name": d["name"], "approved_by": d["approved_by"],
+                    "created": d["created"], "seen": self.seen(d),
+                }
                 for key, d in self._devices.items()
             ]
         return sorted(items, key=lambda item: item["created"])
@@ -1259,13 +1294,13 @@ class Pairing:
             return None
         token = secrets.token_urlsafe(24)
         key = secrets.token_urlsafe(24)
-        self.pending[token] = {"key": key, "created": time.monotonic(), "cookie": None}
+        self.pending[token] = {"key": key, "created": time.monotonic(), "approved_by": None}
         return {"key": key, "token": token, "expires_in": PAIR_CODE_TTL}
 
     def by_key(self, key: str) -> Optional[Dict[str, Any]]:
         self.purge()
         for entry in self.pending.values():
-            if entry["cookie"] is None and same(entry["key"], key):
+            if entry["approved_by"] is None and same(entry["key"], key):
                 return entry
         return None
 
@@ -1656,6 +1691,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()
             if device is None or not same(digest, device["hash"]):
                 return None
+            idle = time.time() - devices.seen(device)
+            if idle > DEVICE_IDLE_TTL:
+                devices.remove(device_id)
+                return None
+            if idle > SESSION_TOUCH_EVERY:
+                devices.touch(device_id)
             return {"username": device["name"], "role": "device", "device_id": device_id}
         session_id, _, secret = raw.partition(".")
         session = sessions.get(session_id) if session_id and secret else None
@@ -1802,12 +1843,13 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         entry = pairing.pending.get(body.token)
         if entry is None:
             return JSONResponse({"status": "expired"})
-        if entry["cookie"] is None:
+        if entry["approved_by"] is None:
             return JSONResponse({"status": "pending"})
-        # Approved on the phone: hand the projector its cookie; the QR code is spent.
+        # Approved on the phone: the QR code is spent. The device is recorded only now, as
+        # the projector collects its cookie, so an approval nobody collects leaves no device.
         del pairing.pending[body.token]
         response = JSONResponse({"status": "approved"})
-        set_login_cookie(request, response, entry["cookie"])
+        set_login_cookie(request, response, devices.add("Проектор", entry["approved_by"]))
         return response
 
     @app.post("/logout")
@@ -1833,7 +1875,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     admin = APIRouter(dependencies=[Depends(require_admin)])
 
     @router.get("/api/me")
-    async def me(request: Request) -> Dict[str, Any]:
+    async def me(request: Request, response: Response) -> Dict[str, Any]:
+        # Every page asks this as it opens, so the cookie is renewed here: the browser keeps
+        # it for COOKIE_MAX_AGE after the last visit, not after the login or the pairing.
+        set_login_cookie(request, response, request.cookies[COOKIE_NAME])
         return require_auth(request)
 
     @router.post("/api/pair/approve")
@@ -1844,7 +1889,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         entry = pairing.by_key(body.key)
         if entry is None:
             raise HTTPException(404, "Цей QR-код уже не діє. Зчитайте новий з екрана проектора.")
-        entry["cookie"] = devices.add("Проектор", user["username"])
+        entry["approved_by"] = user["username"]
         return {"ok": True}
 
     @router.get("/pair", response_class=HTMLResponse)
@@ -2353,7 +2398,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     tvtest_message(message)
         except WebSocketDisconnect:
             pass
-        except Exception:  # the page sent something that is not JSON
+        except Exception:  # the page sent something that is not JSON, or handling it failed
+            log.exception("The projector connection failed")
             with suppress(Exception):
                 await ws.close(code=1003)
         finally:
@@ -2403,6 +2449,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         except WebSocketDisconnect:
             pass
         except Exception:
+            log.exception("A remote connection failed")
             with suppress(Exception):
                 await ws.close(code=1003)
         finally:
