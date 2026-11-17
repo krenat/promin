@@ -18,10 +18,15 @@ from main import (  # noqa: E402
     ProcessingError,
     Settings,
     build_ffmpeg_args,
+    clean_tvtest_report,
     create_app,
     plan_encode,
+    read_json,
     thumbnail_args,
+    tvtest_fits,
+    tvtest_levels,
     video_info,
+    write_json,
 )
 
 TOKEN = "test-token-1234567890"
@@ -366,10 +371,10 @@ def test_pages_redirect_to_login(anon):
         r = anon.get(path)
         assert r.status_code == 303, path
         assert r.headers["location"] == "/login"
-    # The projector page is open: without a login it only shows a pairing code.
+    # The projector page is open: without a login it only shows a QR code to pair.
     r = anon.get("/tv")
     assert r.status_code == 200
-    assert "pair-code" in r.text
+    assert "pair-qr" in r.text
 
 
 def test_api_requires_login(anon, tmp_path):
@@ -810,13 +815,18 @@ def test_projector_state_is_sanitized(client):
             assert len(state["name"]) == 200
 
 
-# ------------------------------------------------------ pairing a projector by code
+# --------------------------------------------------- pairing a projector by QR code
 
 
 def start_pairing(tv: TestClient) -> dict:
     r = tv.post("/api/pair/start")
     assert r.status_code == 200
     return r.json()
+
+
+def pair_key(pairing: dict) -> dict:
+    """What the phone sends after scanning: the key from the address in the QR code."""
+    return {"key": pairing["url"].split("?t=")[1]}
 
 
 def pair_status(tv: TestClient, token: str) -> str:
@@ -829,15 +839,20 @@ def projector(client):
     return TestClient(client.app, follow_redirects=False)
 
 
-def test_projector_is_paired_by_code(client, projector):
+def test_projector_is_paired_by_qr_code(client, projector):
     assert projector.get("/api/me").status_code == 401
     pairing = start_pairing(projector)
-    assert len(pairing["code"]) == 6 and pairing["code"].isdigit()
+    # The QR code is a picture of an address on this very server, with a key nobody can guess.
+    assert pairing["url"].startswith("http://testserver/pair?t=")
+    assert len(pair_key(pairing)["key"]) >= 32
+    assert pairing["qr"].startswith("<svg") and "viewBox" in pairing["qr"]
+    assert "key" not in pairing and "code" not in pairing
     assert pair_status(projector, pairing["token"]) == "pending"
 
-    # The code is typed on a phone that is already logged in; a space in the middle is fine.
-    spaced = pairing["code"][:3] + " " + pairing["code"][3:]
-    assert client.post("/api/pair/approve", json={"code": spaced}).status_code == 200
+    # The phone that scanned it is already logged in: it opens the page and confirms.
+    page = client.get(pairing["url"])
+    assert page.status_code == 200 and "Підключити проектор?" in page.text
+    assert client.post("/api/pair/approve", json=pair_key(pairing)).status_code == 200
 
     r = projector.post("/api/pair/status", json={"token": pairing["token"]})
     assert r.json()["status"] == "approved"
@@ -854,43 +869,72 @@ def test_projector_is_paired_by_code(client, projector):
 
 def test_code_works_only_once(client, projector):
     pairing = start_pairing(projector)
-    assert client.post("/api/pair/approve", json={"code": pairing["code"]}).status_code == 200
-    assert client.post("/api/pair/approve", json={"code": pairing["code"]}).status_code == 404
+    assert client.post("/api/pair/approve", json=pair_key(pairing)).status_code == 200
+    assert client.post("/api/pair/approve", json=pair_key(pairing)).status_code == 404
     assert pair_status(projector, pairing["token"]) == "approved"
     assert pair_status(projector, pairing["token"]) == "expired"
 
 
 def test_wrong_or_unknown_code_is_rejected(client, projector):
     pairing = start_pairing(projector)
-    wrong = "%06d" % ((int(pairing["code"]) + 1) % 10**6)
-    assert client.post("/api/pair/approve", json={"code": wrong}).status_code == 404
-    assert client.post("/api/pair/approve", json={"code": "12"}).status_code == 404
+    assert client.post("/api/pair/approve", json={"key": "x" * 32}).status_code == 404
+    assert client.post("/api/pair/approve", json={"key": ""}).status_code == 404
+    # The polling token is the projector's own secret: it approves nothing.
+    assert client.post("/api/pair/approve", json={"key": pairing["token"]}).status_code == 404
+    assert client.post("/api/pair/approve", json={"code": "123456"}).status_code == 422
     assert pair_status(projector, pairing["token"]) == "pending"
     assert pair_status(projector, "no-such-token") == "expired"
+
+
+def test_scanning_without_a_login_returns_to_the_code_after_it(projector):
+    anon = TestClient(projector.app, follow_redirects=False)  # a phone that is not logged in
+    pairing = start_pairing(projector)
+    path = pairing["url"][len("http://testserver"):]
+    r = anon.get(path)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login?next=" + path.replace("/", "%2F").replace("?", "%3F").replace("=", "%3D")
+    assert 'name="next" value="%s"' % path in anon.get(r.headers["location"]).text
+    r = anon.post("/login", data={"username": "admin", "password": TOKEN, "next": path})
+    assert r.status_code == 303 and r.headers["location"] == path
+    assert anon.post("/api/pair/approve", json=pair_key(pairing)).status_code == 200
+
+
+@pytest.mark.parametrize("next_path", ["/pair?t=short", "/pair?t=" + "a" * 32 + "&x=1", "/pair", "//evil.example/pair?t=" + "a" * 32])
+def test_login_returns_only_to_a_well_formed_code(anon, next_path):
+    r = anon.post("/login", data={"username": "admin", "password": TOKEN, "next": next_path})
+    assert r.status_code == 303 and r.headers["location"] == "/"
+
+
+def test_a_projector_cannot_open_the_confirmation_page(client, projector):
+    pairing = start_pairing(projector)
+    client.post("/api/pair/approve", json=pair_key(pairing))
+    pair_status(projector, pairing["token"])
+    r = projector.get("/pair?t=" + "a" * 32)
+    assert r.status_code == 303 and r.headers["location"] == "/"
 
 
 def test_code_expires(client, projector):
     pairing = start_pairing(projector)
     client.app.state.pairing.pending[pairing["token"]]["created"] -= 11 * 60
-    assert client.post("/api/pair/approve", json={"code": pairing["code"]}).status_code == 404
+    assert client.post("/api/pair/approve", json=pair_key(pairing)).status_code == 404
     assert pair_status(projector, pairing["token"]) == "expired"
 
 
 def test_approving_requires_a_logged_in_user(client, projector, viewer):
     pairing = start_pairing(projector)
-    assert projector.post("/api/pair/approve", json={"code": pairing["code"]}).status_code == 401
+    assert projector.post("/api/pair/approve", json=pair_key(pairing)).status_code == 401
     # A viewer can pair a projector too.
-    assert viewer.post("/api/pair/approve", json={"code": pairing["code"]}).status_code == 200
+    assert viewer.post("/api/pair/approve", json=pair_key(pairing)).status_code == 200
     assert pair_status(projector, pairing["token"]) == "approved"
     # But a projector itself cannot pair other projectors.
     other = TestClient(client.app, follow_redirects=False)
     second = start_pairing(other)
-    assert projector.post("/api/pair/approve", json={"code": second["code"]}).status_code == 403
+    assert projector.post("/api/pair/approve", json=pair_key(second)).status_code == 403
 
 
 def test_projector_can_only_show(client, projector):
     pairing = start_pairing(projector)
-    client.post("/api/pair/approve", json={"code": pairing["code"]})
+    client.post("/api/pair/approve", json=pair_key(pairing))
     pair_status(projector, pairing["token"])
 
     assert projector.get("/api/videos").status_code == 200
@@ -909,7 +953,7 @@ def test_projector_can_only_show(client, projector):
 
 def test_admin_can_disconnect_projector(client, projector):
     pairing = start_pairing(projector)
-    client.post("/api/pair/approve", json={"code": pairing["code"]})
+    client.post("/api/pair/approve", json=pair_key(pairing))
     pair_status(projector, pairing["token"])
 
     devices = client.get("/api/devices").json()["devices"]
@@ -929,7 +973,7 @@ def test_admin_can_disconnect_projector(client, projector):
 
 def test_forged_device_cookie_is_rejected(client, projector):
     pairing = start_pairing(projector)
-    client.post("/api/pair/approve", json={"code": pairing["code"]})
+    client.post("/api/pair/approve", json=pair_key(pairing))
     pair_status(projector, pairing["token"])
     device_id = client.get("/api/devices").json()["devices"][0]["id"]
 
@@ -950,7 +994,7 @@ def test_devices_survive_restart(tmp_path):
     with make_client(tmp_path) as c:
         tv = TestClient(c.app, follow_redirects=False)
         pairing = start_pairing(tv)
-        c.post("/api/pair/approve", json={"code": pairing["code"]})
+        c.post("/api/pair/approve", json=pair_key(pairing))
         cookie = tv.post("/api/pair/status", json={"token": pairing["token"]}).cookies["promin_session"]
         # The device secret is not stored in the file as plain text.
         assert cookie.split(".", 1)[1] not in (tmp_path / "devices.json").read_text(encoding="utf-8")
@@ -1321,7 +1365,7 @@ def test_viewer_manages_the_queue_but_a_projector_does_not(client, viewer, proje
     assert viewer.get("/api/queue").status_code == 200
 
     pairing = start_pairing(projector)
-    client.post("/api/pair/approve", json={"code": pairing["code"]})
+    client.post("/api/pair/approve", json=pair_key(pairing))
     pair_status(projector, pairing["token"])
     assert projector.get("/api/queue").status_code == 403
     assert projector.post("/api/queue", json={"video_id": "aaa"}).status_code == 403
@@ -1398,6 +1442,13 @@ def test_tv_page_reports_the_end_of_a_video(client):
     page = client.get("/tv").text
     assert "type: 'ended'" in page
     assert "addEventListener('ended', finished)" in page
+
+
+def test_tv_page_retries_a_failed_video_before_giving_up(client):
+    page = client.get("/tv").text
+    # An error is not the end of the video: a network drop must not start the next one.
+    assert "addEventListener('error', failed)" in page
+    assert "addEventListener('error', finished)" not in page
 
 
 # -------------------------------------------------------------------- folders
@@ -1515,7 +1566,7 @@ def test_viewer_manages_folders_but_a_projector_does_not(client, viewer, project
     assert viewer.patch("/api/folders/" + films, json={"name": "Кіно"}).status_code == 200
 
     pairing = start_pairing(projector)
-    client.post("/api/pair/approve", json={"code": pairing["code"]})
+    client.post("/api/pair/approve", json=pair_key(pairing))
     pair_status(projector, pairing["token"])
     assert projector.post("/api/folders", json={"name": "x"}).status_code == 403
     assert projector.post("/api/videos/aaa/folder", json={"folder": None}).status_code == 403
@@ -1581,3 +1632,407 @@ def test_quality_is_not_read_for_unfinished_or_missing_files(tmp_path):
         time.sleep(0.3)
         # The file is not there: the card simply has no quality, and nothing breaks.
         assert c.get("/api/videos").json()["videos"][0]["info"] is None
+
+
+# ---------------------------------------------------------- durable data files
+
+
+def test_write_json_keeps_the_previous_version(tmp_path):
+    path = tmp_path / "data.json"
+    write_json(path, {"v": 1})
+    write_json(path, {"v": 2}, private=True)
+    assert json.loads(path.read_text()) == {"v": 2}
+    assert json.loads((tmp_path / "data.json.bak").read_text()) == {"v": 1}
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert not (tmp_path / "data.json.tmp").exists()
+
+
+def test_damaged_file_falls_back_to_the_backup_and_is_kept(tmp_path):
+    path = tmp_path / "data.json"
+    write_json(path, {"v": 1})
+    write_json(path, {"v": 2})
+    path.write_text('{"v": 2', encoding="utf-8")  # cut short by a power cut
+    assert read_json(path, dict) == {"v": 1}
+    # The damaged file is moved aside, not lost and not overwritten later.
+    broken = list(tmp_path.glob("data.json.broken-*"))
+    assert len(broken) == 1 and broken[0].read_text() == '{"v": 2'
+    assert not path.exists()
+
+
+def test_finished_tmp_file_wins_over_the_backup(tmp_path):
+    # A power cut between moving the old file to .bak and the new one into place.
+    path = tmp_path / "data.json"
+    (tmp_path / "data.json.bak").write_text('{"v": 1}')
+    (tmp_path / "data.json.tmp").write_text('{"v": 2}')
+    assert read_json(path, dict) == {"v": 2}
+    # A half-written .tmp is skipped.
+    (tmp_path / "data.json.tmp").write_text('{"v": ')
+    assert read_json(path, dict) == {"v": 1}
+
+
+def test_nothing_usable_reads_as_none(tmp_path):
+    path = tmp_path / "data.json"
+    assert read_json(path, dict) is None
+    path.write_text("[]")
+    assert read_json(path, lambda d: d["x"]) is None
+
+
+def test_video_list_survives_a_damaged_file(tmp_path):
+    with make_client(tmp_path) as c:
+        add_fake_video(c, tmp_path, "aaa")
+        add_fake_video(c, tmp_path, "bbb")
+    (tmp_path / "videos.json").write_text('{"aaa": {"id": "aaa", "na', encoding="utf-8")
+    with make_client(tmp_path) as c:
+        # The previous version: written before "bbb" was added.
+        assert video_ids(c) == {"aaa"}
+
+
+def test_damaged_users_file_does_not_stop_the_service(tmp_path):
+    (tmp_path / "users.json").write_text("garbage", encoding="utf-8")
+    with make_client(tmp_path) as c:
+        assert c.get("/api/me").json()["username"] == "admin"
+
+
+# --------------------------------------------------------- stuck ffmpeg/ffprobe
+
+
+def fake_tool(tmp_path: Path, name: str) -> str:
+    """A stand-in for ffmpeg or ffprobe that hangs without a word."""
+    path = tmp_path / name
+    path.write_text("#!/bin/sh\nexec sleep 30\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+@needs_ffmpeg
+def test_stuck_ffmpeg_is_stopped(client, tmp_path, small_clip):
+    transcoder = client.app.state.transcoder
+    transcoder.ffmpeg = fake_tool(tmp_path, "ffmpeg")
+    transcoder.stall_seconds = 1
+    started = time.time()
+    video = wait_done(client, upload(client, small_clip).json()["id"], timeout=20)
+    assert video["status"] == "error" and "завис" in video["error"]
+    assert time.time() - started < 15
+    assert not list((tmp_path / "videos").glob("*.tmp.mp4"))
+
+
+def test_stuck_ffprobe_is_stopped(client, tmp_path, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "PROBE_TIMEOUT_SECONDS", 1)
+    transcoder = client.app.state.transcoder
+    transcoder.ffmpeg = transcoder.ffmpeg or "/bin/false"
+    transcoder.ffprobe = fake_tool(tmp_path, "ffprobe")
+    video = wait_done(client, upload(client, b"x" * 100).json()["id"], timeout=20)
+    assert video["status"] == "error" and "ffprobe" in video["error"]
+
+
+# ------------------------------------------------- losing access closes the remote
+
+
+def remote_closes(ws) -> int:
+    with pytest.raises(WebSocketDisconnect) as closed:
+        while True:
+            ws.receive_json()
+    return closed.value.code
+
+
+def test_deleted_user_loses_the_remote_at_once(client, viewer):
+    with viewer.websocket_connect("/ws?role=remote") as remote, \
+            client.websocket_connect("/ws?role=remote") as admin_remote:
+        remote.receive_json()
+        admin_remote.receive_json()
+        assert client.delete("/api/users/olena").status_code == 204
+        assert remote_closes(remote) == 4401
+        # The administrator's own remote stays.
+        admin_remote.send_json({"type": "command", "action": "pause"})
+        assert admin_remote.receive_json()["type"] == "error"  # no projector, but connected
+
+
+def test_password_change_closes_the_remote(client, viewer):
+    with viewer.websocket_connect("/ws?role=remote") as remote:
+        remote.receive_json()
+        client.post("/api/users/olena/password", json={"password": "brand-new-pass-2"})
+        assert remote_closes(remote) == 4401
+
+
+def test_logout_closes_remotes_of_that_session(client, viewer):
+    with viewer.websocket_connect("/ws?role=remote") as remote:
+        remote.receive_json()
+        assert viewer.post("/logout").status_code == 303
+        assert remote_closes(remote) == 4401
+
+
+
+# ------------------------------------------------------ leftovers of the review
+
+
+def test_batch_delete_writes_the_list_once(client, tmp_path, monkeypatch):
+    import main
+
+    for i in range(20):
+        add_fake_video(client, tmp_path, "v%02d" % i)
+    writes = []
+    real = main.write_json
+    monkeypatch.setattr(main, "write_json", lambda path, *a, **kw: (writes.append(path.name), real(path, *a, **kw)))
+    r = client.post("/api/videos/delete", json={"ids": ["v%02d" % i for i in range(20)]})
+    assert len(r.json()["deleted"]) == 20
+    assert writes.count("videos.json") == 1
+    assert video_ids(client) == set()
+
+
+def test_deleting_a_folder_writes_the_list_once(client, tmp_path, monkeypatch):
+    import main
+
+    folder = make_folder(client, "Мультики")
+    for i in range(10):
+        add_fake_video(client, tmp_path, "v%02d" % i)
+        client.post("/api/videos/v%02d/folder" % i, json={"folder": folder})
+    writes = []
+    real = main.write_json
+    monkeypatch.setattr(main, "write_json", lambda path, *a, **kw: (writes.append(path.name), real(path, *a, **kw)))
+    assert client.delete("/api/folders/" + folder).status_code == 204
+    assert writes.count("videos.json") == 1
+    assert all(v["folder"] is None for v in library(client)["videos"])
+
+
+@pytest.mark.parametrize(
+    "name, content",
+    [
+        ("videos.json", {"aaa": {"id": "aaa", "name": "a.mp4"}}),
+        ("videos.json", {"aaa": {"id": "aaa", "name": "a.mp4", "status": "ready", "created": "today"}}),
+        ("users.json", {"olena": {"role": "viewer"}}),
+        ("sessions.json", {"abc": {"username": "admin"}}),
+        ("devices.json", {"abc": {"name": "Проектор"}}),
+    ],
+)
+def test_file_of_the_wrong_shape_counts_as_damaged(tmp_path, name, content):
+    (tmp_path / name).write_text(json.dumps(content), encoding="utf-8")
+    with make_client(tmp_path) as c:
+        assert c.get("/api/videos").json()["videos"] == []
+        assert c.get("/api/users").status_code == 200
+        assert c.get("/api/devices").json()["devices"] == []
+    # Kept aside for a person to look at, not overwritten.
+    assert list(tmp_path.glob(name + ".broken-*"))
+
+
+def test_video_without_a_source_fails_instead_of_stopping_the_worker(client, tmp_path):
+    client.app.state.store.add({
+        "id": "old", "name": "old.mp4", "size": 1, "status": "error", "created": time.time(),
+    })
+    assert client.post("/api/videos/old/retry").status_code == 409
+    client.app.state.store.update("old", status="queued")
+    client.app.state.transcoder.enqueue("old")
+    assert wait_done(client, "old")["status"] == "error"
+
+
+def test_unexpected_failure_leaves_no_unfinished_file(client, tmp_path, small_clip, monkeypatch):
+    import main
+
+    def explode(ffmpeg, src, dst, *args):
+        dst.write_bytes(b"half")
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(main, "build_ffmpeg_args", explode)
+    video = upload(client, small_clip).json()
+    assert wait_done(client, video["id"])["status"] == "error"
+    assert not list((tmp_path / "videos").glob("*.tmp.mp4"))
+
+
+def test_projector_cannot_act_as_a_remote(client, projector):
+    pairing = start_pairing(projector)
+    client.post("/api/pair/approve", json=pair_key(pairing))
+    pair_status(projector, pairing["token"])
+    with projector.websocket_connect("/ws?role=tv"):
+        pass
+    with projector.websocket_connect("/ws?role=remote") as ws:
+        assert remote_closes(ws) == 1008
+
+
+def test_cookies_are_secure_only_over_https(tmp_path):
+    settings = Settings(data_dir=tmp_path, token=TOKEN)
+    with TestClient(create_app(settings), follow_redirects=False) as plain:
+        assert "secure" not in sign_in(plain).headers["set-cookie"].lower()
+    with TestClient(create_app(settings), base_url="https://testserver", follow_redirects=False) as tls:
+        assert "secure" in sign_in(tls).headers["set-cookie"].lower()
+        # The projector's cookie follows the same rule.
+        pairing = start_pairing(tls)
+        tls.post("/api/pair/approve", json=pair_key(pairing))
+        r = tls.post("/api/pair/status", json={"token": pairing["token"]})
+        assert r.json()["status"] == "approved"
+        assert "secure" in r.headers["set-cookie"].lower()
+
+
+def test_limiter_forgets_addresses_that_never_return(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "LIMITER_MAX_ADDRESSES", 10)
+    limiter = main.LoginLimiter(max_failures=5, window=0.05)
+    for i in range(10):
+        limiter.fail("10.0.0.%d" % i)
+    time.sleep(0.1)
+    limiter.fail("10.0.1.1")
+    assert list(limiter._failures) == ["10.0.1.1"]
+
+
+# ---------------------------------------------------------------- projector check
+
+
+def played(clip_id: str, advance: float = 1.0, frames: int = 180, dropped: int = 0) -> dict:
+    return {
+        "id": clip_id, "outcome": "played", "advance": advance, "frames": frames,
+        "dropped": dropped,
+    }
+
+
+def test_check_levels_grow_and_depend_on_easier_ones():
+    levels = tvtest_levels()
+    assert [level["id"] for level in levels][:4] == ["720p30", "720p60", "1080p30", "1080p60"]
+    needs = {level["id"]: level["needs"] for level in levels}
+    assert needs["720p30"] is None
+    assert needs["1080p60"] == "1080p30" and needs["2160p30"] == "1440p30"
+    assert {level["height"]: level["kbps"] for level in levels}[1080] == 8000
+
+
+def test_check_report_gets_a_verdict_for_every_clip():
+    report = {
+        "speed_kbps": 23456.7,
+        "device": {"agent": "Tizen " * 100, "screen_width": 1920, "screen_height": 1080},
+        "clips": [
+            played("720p30"),
+            played("720p60", frames=360, dropped=18),      # exactly the allowed 5%
+            played("1080p30", advance=0.97, frames=0),     # no frame counters: the clock decides
+            played("1080p60", frames=360, dropped=40),
+            played("1440p30", advance=0.7),
+            {"id": "1440p60", "outcome": "skipped"},
+            {"id": "2160p30", "outcome": "failed", "reason": "download"},
+            {"id": "nonsense", "outcome": "played", "advance": 1},
+            "not a clip",
+        ],
+    }
+    result = clean_tvtest_report(report, tvtest_levels())
+    status = {clip["id"]: clip["status"] for clip in result["clips"]}
+    assert status == {
+        "720p30": "ok", "720p60": "ok", "1080p30": "ok", "1080p60": "rough",
+        "1440p30": "rough", "1440p60": "skipped", "2160p30": "failed",
+        "2160p60": "skipped",  # not reported at all
+    }
+    assert result["clips"][6]["reason"] == "download"
+    assert result["speed_kbps"] == 23456
+    assert len(result["device"]["agent"]) == 300
+    assert tvtest_fits(result) == {"max_height": 1080, "max_fps": 30, "network_kbps": 11728}
+
+
+def test_check_report_survives_junk():
+    junk = {"clips": [{"id": "720p30", "outcome": "played", "advance": "NaN", "frames": []}],
+            "device": "tv", "speed_kbps": float("inf")}
+    result = clean_tvtest_report(junk, tvtest_levels())
+    assert result["clips"][0]["status"] == "rough"
+    assert result["speed_kbps"] is None and result["device"]["agent"] == ""
+    assert tvtest_fits(result) == {"max_height": None, "max_fps": None, "network_kbps": None}
+    assert clean_tvtest_report({}, tvtest_levels())["clips"][0]["status"] == "skipped"
+
+
+def test_check_needs_an_idle_started_projector(client):
+    assert client.get("/api/tvtest").json() == {
+        "status": "idle", "step": 0, "steps": 8, "error": None, "result": None,
+    }
+    assert client.post("/api/tvtest").status_code == 409  # no projector
+    with client.websocket_connect("/ws?role=tv") as tv:
+        tv.send_json(tv_state(started=False))
+        client.get("/api/me")  # lets the server read the state
+        assert "Почати" in client.post("/api/tvtest").json()["detail"]
+        tv.send_json(tv_state(video_id="abc", name="Clip"))
+        client.get("/api/me")
+        assert "зупиніть" in client.post("/api/tvtest").json()["detail"]
+
+
+def wait_check(client: TestClient, status: str, timeout: float = 60) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        view = client.get("/api/tvtest").json()
+        if view["status"] == status:
+            return view
+        time.sleep(0.05)
+    raise AssertionError("the check did not become %s" % status)
+
+
+@needs_ffmpeg
+def test_check_runs_on_the_projector_and_is_remembered(client, tmp_path):
+    client.app.state.tvtest.levels = tvtest_levels()[:2]
+    with client.websocket_connect("/ws?role=tv") as tv:
+        tv.send_json(tv_state())
+        client.get("/api/me")
+        r = client.post("/api/tvtest")
+        assert r.status_code == 202 and r.json()["status"] == "preparing"
+        assert client.post("/api/tvtest").status_code == 409  # one at a time
+
+        command = tv.receive_json()
+        assert command["action"] == "test" and command["seconds"] > 0
+        assert [clip["id"] for clip in command["clips"]] == ["720p30", "720p60"]
+        assert wait_check(client, "running")["step"] == 0
+
+        # The clip is what the settings promise: H.264 at that size, about 4 Mbit/s.
+        clip = client.get(command["clips"][0]["url"])
+        assert clip.status_code == 200 and clip.headers["content-type"] == "video/mp4"
+        (tmp_path / "clip.mp4").write_bytes(clip.content)
+        video = probe_video(tmp_path / "clip.mp4")
+        assert (video["codec_name"], video["width"], video["height"]) == ("h264", 1280, 720)
+        assert 3_000_000 < len(clip.content) < 5_500_000
+        speed = client.get(command["speed"]["url"])
+        assert len(speed.content) == 4 * 1024 * 1024
+        assert client.get("/tvtest/clip/..%2Fvideos.json").status_code == 404
+
+        tv.send_json({"type": "test", "run": "someone-else", "done": True, "clips": []})
+        tv.send_json({"type": "test", "run": command["run"], "step": 2})
+        assert wait_check(client, "running")["result"] is None  # the foreign report is ignored
+        tv.send_json({
+            "type": "test", "run": command["run"], "done": True, "speed_kbps": 40000,
+            "device": {"agent": "TestTV", "screen_width": 1920, "screen_height": 1080},
+            "clips": [played("720p30"), played("720p60", advance=0.5)],
+        })
+        view = wait_check(client, "idle")
+    result = view["result"]
+    assert view["error"] is None
+    assert [clip["status"] for clip in result["clips"]] == ["ok", "rough"]
+    assert result["fits"] == {"max_height": 720, "max_fps": 30, "network_kbps": 20000}
+    assert result["device"]["agent"] == "TestTV"
+
+    # The result is still there after a restart.
+    with make_client(tmp_path) as again:
+        assert again.get("/api/tvtest").json()["result"] == result
+
+
+@needs_ffmpeg
+def test_check_fails_when_the_projector_leaves_or_gets_busy(client):
+    client.app.state.tvtest.levels = tvtest_levels()[:1]
+    with client.websocket_connect("/ws?role=tv") as tv:
+        tv.send_json(tv_state())
+        client.get("/api/me")
+        assert client.post("/api/tvtest").status_code == 202
+        command = tv.receive_json()
+        tv.send_json({"type": "test", "run": command["run"], "aborted": True})
+        view = wait_check(client, "idle")
+        assert "перервано" in view["error"] and view["result"] is None
+
+        assert client.post("/api/tvtest").status_code == 202
+        tv.receive_json()
+        wait_check(client, "running")
+    assert "від'єднався" in wait_check(client, "idle")["error"]
+
+
+def test_check_gives_up_on_a_silent_projector(client):
+    check = client.app.state.tvtest
+    check.status, check.run, check.seen = "running", "abc", time.time() - 3600
+    view = client.get("/api/tvtest").json()
+    assert view["status"] == "idle" and "перестав відповідати" in view["error"]
+
+
+def test_check_is_started_by_people_and_run_by_projectors(client, anon, projector):
+    assert anon.get("/api/tvtest").status_code == 401
+    assert anon.get("/tvtest/speed", follow_redirects=False).status_code == 303
+    pairing = start_pairing(projector)
+    client.post("/api/pair/approve", json=pair_key(pairing))
+    pair_status(projector, pairing["token"])
+    assert projector.get("/api/tvtest").status_code == 403
+    assert projector.post("/api/tvtest").status_code == 403
+    assert projector.get("/tvtest/speed").status_code == 200

@@ -2,7 +2,7 @@
 
 Video list, upload, transcoding, playback, deletion, users with roles and a remote:
 the phone controls the projector page over WebSocket. The projector is paired with
-a code from its screen that is approved on the phone.
+a QR code from its screen that is scanned and approved on the phone.
 """
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import hmac
 import html
+import io
 import json
 import logging
 import os
@@ -23,10 +24,11 @@ import uuid
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, unquote, urlsplit
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import anyio
+import segno
 from fastapi import (
     APIRouter, Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect,
 )
@@ -58,6 +60,10 @@ LOGIN_MAX_BODY = 4096
 BATCH_DELETE_MAX = 500
 QUEUE_MAX = 200
 FOLDERS_MAX = 100
+# How long ffmpeg and ffprobe may go without a sign of life before they are stopped.
+FFMPEG_STALL_SECONDS = 10 * 60
+PROBE_TIMEOUT_SECONDS = 2 * 60
+THUMB_TIMEOUT_SECONDS = 2 * 60
 FOLDER_NAME_MAX = 60
 MIN_TOKEN_LENGTH = 12
 
@@ -67,10 +73,12 @@ REMOTE_ACTIONS = ("load", "play", "pause", "seek", "seek_by", "volume", "stop", 
 WS_REPLACED = 4000  # the projector page was opened elsewhere
 WS_UNAUTHORIZED = 4401
 
-# Pairing a projector by code: how long a code lives and how many may wait at once.
+# Pairing a projector with a QR code: how long one lives and how many may wait at once.
 PAIR_CODE_TTL = 10 * 60
-PAIR_MAX_PENDING = 50
+PAIR_MAX_PENDING = 500
 PAIR_STARTS_PER_WINDOW = 10
+# The address inside the QR code: login may return to it, with a well-formed key only.
+PAIR_NEXT_RE = re.compile(r"/pair\?t=[A-Za-z0-9_-]{16,64}")
 
 # Built-in administrator: its password is PROMIN_TOKEN and is never stored in a file.
 ADMIN = "admin"
@@ -80,6 +88,7 @@ MIN_PASSWORD_LENGTH = 8
 PBKDF2_ROUNDS = 200_000
 LOGIN_MAX_FAILURES = 5
 LOGIN_WINDOW_SECONDS = 15 * 60
+LIMITER_MAX_ADDRESSES = 5000  # past this many, addresses with no recent failures are forgotten
 
 # What the administrator may choose on the settings page. The frame is 16:9.
 HEIGHTS = {720: 1280, 1080: 1920, 1440: 2560, 2160: 3840}  # height → width
@@ -105,6 +114,23 @@ HDR_FILTER_SWSCALE = (
     "tonemap=tonemap=hable:desat=0,"
     "scale=out_transfer=bt709:out_color_matrix=bt709:out_range=tv"
 )
+
+# The projector check: the projector plays a generated clip for every resolution and frame
+# rate offered on the settings page and reports how it went, and measures its download speed.
+TVTEST_VERSION = 1  # part of the clip file names: raise it when the clips change
+TVTEST_CLIP_SECONDS = 8
+TVTEST_MEASURE_SECONDS = 6  # how long playback of each clip is watched
+TVTEST_SPEED_SECONDS = 6
+TVTEST_SPEED_CHUNK = 4 * MB
+TVTEST_MIN_ADVANCE = 0.9  # playback must keep up with the clock this closely
+TVTEST_MAX_DROPPED = 0.05  # and drop at most this share of the frames
+TVTEST_STALE_SECONDS = 120  # a projector silent for this long has given up
+TVTEST_CLIP_TIMEOUT_SECONDS = 5 * 60
+# A sensible bitrate ceiling for each resolution: the settings page suggests it, and the
+# clips of the projector check are encoded at it.
+SUGGESTED_KBPS = {720: 4000, 1080: 8000, 1440: 16000, 2160: 30000}
+# The bitrate ceiling should leave this much of the measured speed for everything else.
+NETWORK_SHARE = 0.5
 
 
 @dataclass
@@ -141,6 +167,96 @@ class Settings:
     @property
     def thumbs_dir(self) -> Path:
         return self.data_dir / "thumbs"
+
+    @property
+    def tvtest_dir(self) -> Path:
+        return self.data_dir / "tvtest"
+
+
+def _sibling(path: Path, suffix: str) -> Path:
+    return path.with_name(path.name + suffix)
+
+
+def write_json(path: Path, data: Any, private: bool = False) -> None:
+    """Writes a data file so that a power cut leaves a readable version behind.
+
+    The new text reaches the disk before it replaces the file, and the previous
+    version stays next to it as `.bak`.
+    """
+    tmp = _sibling(path, ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    if private:
+        os.chmod(tmp, 0o600)
+    if path.exists():
+        os.replace(path, _sibling(path, ".bak"))
+    os.replace(tmp, path)
+    with suppress(OSError):  # make the renames themselves durable where the system allows
+        fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def read_json(path: Path, check: Callable[[Any], Any]) -> Any:
+    """Reads a data file written by write_json; None if there is nothing usable.
+
+    `check` turns the parsed JSON into what the store keeps, raising ValueError,
+    TypeError, KeyError or AttributeError if it does not fit. A damaged file is moved
+    aside as `.broken-<time>` rather than overwritten, and the newest readable copy
+    (an unfinished `.tmp`, then the `.bak`) is used instead.
+    """
+    if path.exists():
+        try:
+            return check(json.loads(path.read_text(encoding="utf-8")))
+        except (ValueError, TypeError, KeyError, AttributeError):
+            broken = _sibling(path, ".broken-%d" % time.time())
+            os.replace(path, broken)
+            log.error("%s is damaged; kept as %s", path.name, broken.name)
+    for copy in (_sibling(path, ".tmp"), _sibling(path, ".bak")):
+        if not copy.exists():
+            continue
+        try:
+            data = check(json.loads(copy.read_text(encoding="utf-8")))
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+        log.warning("%s could not be read; using %s", path.name, copy.name)
+        return data
+    return None
+
+
+def dict_of_dicts(data: Any) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(data, dict) or not all(isinstance(v, dict) for v in data.values()):
+        raise TypeError("expected an object of objects")
+    return data
+
+
+def records(*keys: str) -> Callable[[Any], Dict[str, Dict[str, Any]]]:
+    """A check for read_json: an object of objects that all have these keys.
+
+    The stores read these keys without looking, so a file that parses but lacks one
+    counts as damaged instead of failing later, in the middle of a request or a start.
+    """
+
+    def check(data: Any) -> Dict[str, Dict[str, Any]]:
+        for name, value in dict_of_dicts(data).items():
+            missing = [key for key in keys if key not in value]
+            if missing:
+                raise KeyError("%s has no %s" % (name, ", ".join(missing)))
+        return data
+
+    return check
+
+
+def video_records(data: Any) -> Dict[str, Dict[str, Any]]:
+    for item in records("id", "name", "status", "created")(data).values():
+        # The list is sorted by this, and bool is a number to Python.
+        if isinstance(item["created"], bool) or not isinstance(item["created"], (int, float)):
+            raise TypeError("created is not a number")
+    return data
 
 
 @dataclass(frozen=True)
@@ -185,20 +301,15 @@ class EncodingStore:
         self._current = defaults
 
     def load(self) -> None:
+        def check(saved: Any) -> Encoding:
+            merged = Encoding(**{**asdict(self.defaults), **dict(saved)})
+            if merged.problem():
+                raise ValueError(merged.problem())
+            return merged
+
         with self._lock:
-            self._current = self.defaults
-            if not self.path.exists():
-                return
-            try:
-                saved = json.loads(self.path.read_text(encoding="utf-8"))
-                merged = Encoding(**{**asdict(self.defaults), **saved})
-            except (ValueError, TypeError):
-                merged = None
             # A damaged or outdated file must not stop the service: fall back to the defaults.
-            if merged is None or merged.problem():
-                log.warning("Ignoring %s: it does not hold valid encoding settings", self.path.name)
-                return
-            self._current = merged
+            self._current = read_json(self.path, check) or self.defaults
 
     def get(self) -> Encoding:
         with self._lock:
@@ -206,9 +317,7 @@ class EncodingStore:
 
     def set(self, encoding: Encoding) -> None:
         with self._lock:
-            tmp = self.path.with_name(self.path.name + ".tmp")
-            tmp.write_text(json.dumps(asdict(encoding), indent=2), encoding="utf-8")
-            os.replace(tmp, self.path)
+            write_json(self.path, asdict(encoding))
             self._current = encoding
 
 
@@ -222,17 +331,10 @@ class Store:
 
     def load(self) -> None:
         with self._lock:
-            if self.path.exists():
-                self._items = json.loads(self.path.read_text(encoding="utf-8"))
-            else:
-                self._items = {}
+            self._items = read_json(self.path, video_records) or {}
 
     def _save(self) -> None:
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(
-            json.dumps(self._items, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        os.replace(tmp, self.path)
+        write_json(self.path, self._items)
 
     def list(self) -> List[Dict[str, Any]]:
         with self._lock:
@@ -258,12 +360,26 @@ class Store:
             return True
 
     def remove(self, video_id: str) -> bool:
+        return bool(self.remove_many([video_id]))
+
+    def remove_many(self, video_ids: List[str]) -> List[str]:
+        """Removes these videos with a single write; returns the ids that were there."""
         with self._lock:
-            if video_id not in self._items:
-                return False
-            del self._items[video_id]
-            self._save()
-            return True
+            removed = [video_id for video_id in video_ids if video_id in self._items]
+            for video_id in removed:
+                del self._items[video_id]
+            if removed:
+                self._save()
+            return removed
+
+    def clear_folder(self, folder_id: str) -> None:
+        """Leaves the videos of a folder without one, with a single write."""
+        with self._lock:
+            inside = [item for item in self._items.values() if item.get("folder") == folder_id]
+            for item in inside:
+                item["folder"] = None
+            if inside:
+                self._save()
 
 
 # ------------------------------------------------------------------ transcoding
@@ -483,6 +599,7 @@ class Transcoder:
         self.ffmpeg = shutil.which("ffmpeg")
         self.ffprobe = shutil.which("ffprobe")
         self.hdr_filter: Optional[str] = None
+        self.stall_seconds = FFMPEG_STALL_SECONDS
         self.progress: Dict[str, float] = {}
         self._queue: Optional[asyncio.Queue] = None
         self._task: Optional[asyncio.Task] = None
@@ -591,7 +708,8 @@ class Transcoder:
         if not item or item["status"] != "queued":
             return
         settings = self.settings
-        src = settings.uploads_dir / item["source"]
+        # A record without a source (a hand-edited list) fails below as a missing original.
+        src = settings.uploads_dir / (item.get("source") or "missing")
         tmp = settings.videos_dir / (video_id + ".tmp.mp4")
         final = settings.videos_dir / (video_id + ".mp4")
         self._current_id = video_id
@@ -633,7 +751,6 @@ class Transcoder:
                 return
             src.unlink(missing_ok=True)  # the original stays on the phone
         except ProcessingError as exc:
-            tmp.unlink(missing_ok=True)
             # Server paths mean nothing to the user.
             text = str(exc).replace(str(src), item["name"]).replace(str(tmp), "готовий файл")
             self.store.update(video_id, status="error", error=text[-2000:])
@@ -641,6 +758,8 @@ class Transcoder:
             proc = self._current_proc
             if proc and proc.returncode is None:
                 proc.kill()
+            # After any failure, an unexpected one included; on success it is already renamed.
+            tmp.unlink(missing_ok=True)
             self._current_id = None
             self._current_proc = None
             self.progress.pop(video_id, None)
@@ -652,7 +771,9 @@ class Transcoder:
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:
-            out, err = await proc.communicate()
+            out, err = await asyncio.wait_for(proc.communicate(), PROBE_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            raise ProcessingError("ffprobe не відповів за %d хвилини" % (PROBE_TIMEOUT_SECONDS // 60))
         finally:
             await self._reap(proc)
         if proc.returncode != 0:
@@ -667,8 +788,18 @@ class Transcoder:
         self._current_proc = proc
         assert proc.stdout is not None and proc.stderr is not None
         err_task = asyncio.create_task(proc.stderr.read())
+        stalled = False
         try:
-            async for raw in proc.stdout:
+            while True:
+                # ffmpeg reports progress twice a second; a long silence means it is stuck.
+                try:
+                    raw = await asyncio.wait_for(proc.stdout.readline(), self.stall_seconds)
+                except asyncio.TimeoutError:
+                    stalled = True
+                    proc.kill()
+                    break
+                if not raw:
+                    break
                 key, _, value = raw.decode(errors="replace").strip().partition("=")
                 # ffmpeg's out_time_ms is in microseconds too, a historical quirk.
                 if key in ("out_time_us", "out_time_ms") and duration > 0:
@@ -676,7 +807,11 @@ class Transcoder:
                         done = int(value) / 1_000_000 / duration
                         self.progress[video_id] = max(0.0, min(done, 1.0))
             code = await proc.wait()
-            return code, (await err_task).decode(errors="replace")
+            err = (await err_task).decode(errors="replace")
+            if stalled:
+                err = "ffmpeg завис: %d хвилин без жодного поступу" % (self.stall_seconds // 60)
+                code = code or -1
+            return code, err
         finally:
             err_task.cancel()
             await self._reap(proc)
@@ -696,7 +831,9 @@ class Transcoder:
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         try:
-            await proc.wait()
+            await asyncio.wait_for(proc.wait(), THUMB_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            log.warning("Thumbnail for %s took too long", video_id)
         finally:
             await self._reap(proc)
         if proc.returncode != 0 or not tmp.is_file():
@@ -750,6 +887,10 @@ class LoginLimiter:
     def fail(self, ip: str) -> float:
         """Records an attempt and returns its stamp, by which it can be forgiven."""
         stamp = time.monotonic()
+        if len(self._failures) >= LIMITER_MAX_ADDRESSES:
+            # Addresses that never return are only dropped here, so the table stays bounded.
+            for known in list(self._failures):
+                self._recent(known)
         self._failures.setdefault(ip, []).append(stamp)
         return stamp
 
@@ -780,16 +921,10 @@ class UserStore:
 
     def load(self) -> None:
         with self._lock:
-            if self.path.exists():
-                self._users = json.loads(self.path.read_text(encoding="utf-8"))
-            else:
-                self._users = {}
+            self._users = read_json(self.path, records("role", "salt", "hash", "created")) or {}
 
     def _save(self) -> None:
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps(self._users, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, self.path)
+        write_json(self.path, self._users, private=True)
 
     def list(self) -> List[Dict[str, Any]]:
         with self._lock:
@@ -844,16 +979,11 @@ class SessionStore:
 
     def load(self) -> None:
         with self._lock:
-            if self.path.exists():
-                self._sessions = json.loads(self.path.read_text(encoding="utf-8"))
-            else:
-                self._sessions = {}
+            check = records("username", "hash", "fingerprint", "seen")
+            self._sessions = read_json(self.path, check) or {}
 
     def _save(self) -> None:
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps(self._sessions, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, self.path)
+        write_json(self.path, self._sessions, private=True)
 
     def add(self, username: str, fingerprint: str) -> str:
         """Creates a session and returns its cookie value. Also purges expired ones."""
@@ -902,26 +1032,18 @@ class FolderStore:
         self._folders: Dict[str, Dict[str, Any]] = {}
 
     def load(self) -> None:
+        def check(data: Any) -> Dict[str, Dict[str, Any]]:
+            return {
+                str(key): {"name": str(value["name"]), "created": float(value["created"])}
+                for key, value in data.items()
+            }
+
         with self._lock:
-            self._folders = {}
-            if not self.path.exists():
-                return
-            try:
-                data = json.loads(self.path.read_text(encoding="utf-8"))
-                folders = {
-                    str(key): {"name": str(value["name"]), "created": float(value["created"])}
-                    for key, value in data.items()
-                }
-            except (ValueError, TypeError, KeyError, AttributeError):
-                # Videos keep their folder ids, so the folders come back once the file is fixed.
-                log.warning("Ignoring %s: it does not hold valid folders", self.path.name)
-                return
-            self._folders = folders
+            # Videos keep their folder ids, so the folders come back once the file is fixed.
+            self._folders = read_json(self.path, check) or {}
 
     def _save(self) -> None:
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps(self._folders, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, self.path)
+        write_json(self.path, self._folders)
 
     def list(self) -> List[Dict[str, Any]]:
         with self._lock:
@@ -993,23 +1115,17 @@ class QueueStore:
         self._entries: List[Dict[str, str]] = []
 
     def load(self) -> None:
+        def check(data: Any) -> List[Dict[str, str]]:
+            if not isinstance(data, list):
+                raise TypeError("expected a list")
+            return [{"entry": str(e["entry"]), "video_id": str(e["video_id"])} for e in data]
+
         with self._lock:
-            self._entries = []
-            if not self.path.exists():
-                return
-            try:
-                data = json.loads(self.path.read_text(encoding="utf-8"))
-                entries = [{"entry": str(e["entry"]), "video_id": str(e["video_id"])} for e in data]
-            except (ValueError, TypeError, KeyError):
-                # A lost queue is a small loss; a service that will not start is a big one.
-                log.warning("Ignoring %s: it does not hold a valid queue", self.path.name)
-                return
-            self._entries = entries
+            # A lost queue is a small loss; a service that will not start is a big one.
+            self._entries = read_json(self.path, check) or []
 
     def _save(self) -> None:
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps(self._entries, indent=2), encoding="utf-8")
-        os.replace(tmp, self.path)
+        write_json(self.path, self._entries)
 
     def list(self) -> List[Dict[str, str]]:
         with self._lock:
@@ -1079,16 +1195,11 @@ class DeviceStore:
 
     def load(self) -> None:
         with self._lock:
-            if self.path.exists():
-                self._devices = json.loads(self.path.read_text(encoding="utf-8"))
-            else:
-                self._devices = {}
+            check = records("name", "hash", "approved_by", "created")
+            self._devices = read_json(self.path, check) or {}
 
     def _save(self) -> None:
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps(self._devices, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, self.path)
+        write_json(self.path, self._devices, private=True)
 
     def add(self, name: str, approved_by: str) -> str:
         """Creates a device and returns its cookie value."""
@@ -1127,7 +1238,12 @@ class DeviceStore:
 
 
 class Pairing:
-    """Codes that projectors are showing right now. They live in memory only."""
+    """Projectors that are showing a QR code right now. They live in memory only.
+
+    Each has two secrets. The polling token stays with the projector; the approval key goes
+    into the QR code on its screen. So someone who sees the screen can approve the projector
+    (after logging in) but cannot collect the cookie meant for it.
+    """
 
     def __init__(self) -> None:
         self.pending: Dict[str, Dict[str, Any]] = {}  # polling token → entry
@@ -1141,18 +1257,15 @@ class Pairing:
         self.purge()
         if len(self.pending) >= PAIR_MAX_PENDING:
             return None
-        taken = {entry["code"] for entry in self.pending.values()}
-        code = "%06d" % secrets.randbelow(10**6)
-        while code in taken:
-            code = "%06d" % secrets.randbelow(10**6)
         token = secrets.token_urlsafe(24)
-        self.pending[token] = {"code": code, "created": time.monotonic(), "cookie": None}
-        return {"code": code, "token": token, "expires_in": PAIR_CODE_TTL}
+        key = secrets.token_urlsafe(24)
+        self.pending[token] = {"key": key, "created": time.monotonic(), "cookie": None}
+        return {"key": key, "token": token, "expires_in": PAIR_CODE_TTL}
 
-    def by_code(self, code: str) -> Optional[Dict[str, Any]]:
+    def by_key(self, key: str) -> Optional[Dict[str, Any]]:
         self.purge()
         for entry in self.pending.values():
-            if entry["cookie"] is None and same(entry["code"], code):
+            if entry["cookie"] is None and same(entry["key"], key):
                 return entry
         return None
 
@@ -1161,8 +1274,8 @@ class PairToken(BaseModel):
     token: str
 
 
-class PairCode(BaseModel):
-    code: str
+class PairKey(BaseModel):
+    key: str
 
 
 class NewUser(BaseModel):
@@ -1225,15 +1338,20 @@ class Hub:
             await self.send(ws, message)
 
 
+def finite(value: Any) -> float:
+    """A number from the projector page; anything else, NaN and infinity read as 0."""
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if number == number and abs(number) != float("inf") else 0.0
+
+
 def clean_state(message: Dict[str, Any]) -> Dict[str, Any]:
     """State from the projector page: only known fields of known types."""
 
     def number(key: str) -> float:
-        try:
-            value = float(message.get(key) or 0)
-        except (TypeError, ValueError):
-            return 0.0
-        return value if value == value and abs(value) != float("inf") else 0.0
+        return finite(message.get(key))
 
     video_id = message.get("video_id")
     name = message.get("name")
@@ -1246,6 +1364,191 @@ def clean_state(message: Dict[str, Any]) -> Dict[str, Any]:
         "paused": bool(message.get("paused")),
         "started": bool(message.get("started")),
     }
+
+
+# -------------------------------------------------------------- projector check
+
+
+def tvtest_levels() -> List[Dict[str, Any]]:
+    """The clips of the projector check, easiest first.
+
+    `needs` names the clip that has to play smoothly before this one is worth trying: the
+    same resolution at the lower frame rate, or the resolution below.
+    """
+    levels: List[Dict[str, Any]] = []
+    base_fps = min(FPS_CHOICES)
+    lower = None
+    for height in sorted(HEIGHTS):
+        base = "%dp%d" % (height, base_fps)
+        for fps in sorted(FPS_CHOICES):
+            levels.append({
+                "id": "%dp%d" % (height, fps), "height": height, "fps": fps,
+                "kbps": SUGGESTED_KBPS[height], "needs": lower if fps == base_fps else base,
+            })
+        lower = base
+    return levels
+
+
+def tvtest_clip_name(level: Dict[str, Any]) -> str:
+    return "v%d-%s.mp4" % (TVTEST_VERSION, level["id"])
+
+
+def tvtest_clip_args(ffmpeg: str, level: Dict[str, Any], out: Path) -> List[str]:
+    """A test clip encoded the way real videos are: H.264 High at the bitrate the settings
+    page suggests for this resolution, with an audio track.
+
+    The noise keeps the encoder from spending far fewer bits than asked on a simple
+    picture, so the decoder gets a realistic load. The audio is silence, but it is there:
+    players drop frames to stay in sync with it.
+    """
+    rate = level["kbps"]
+    return [
+        ffmpeg, "-nostdin", "-y", "-v", "error",
+        "-f", "lavfi", "-i", "testsrc2=size=%dx%d:rate=%d" % (
+            HEIGHTS[level["height"]], level["height"], level["fps"]),
+        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+        "-t", str(TVTEST_CLIP_SECONDS),
+        "-vf", "noise=alls=12:allf=t,format=yuv420p",
+        "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high",
+        "-b:v", "%dk" % rate, "-maxrate", "%dk" % rate, "-bufsize", "%dk" % (rate * 2),
+        "-g", str(level["fps"] * 2),
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart", "-f", "mp4", str(out),
+    ]
+
+
+async def make_tvtest_clip(ffmpeg: str, level: Dict[str, Any], folder: Path) -> None:
+    """Generates the clip of this level unless it is already there."""
+    final = folder / tvtest_clip_name(level)
+    if final.is_file():
+        return
+    tmp = _sibling(final, ".tmp")
+    proc = await asyncio.create_subprocess_exec(
+        *tvtest_clip_args(ffmpeg, level, tmp),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, err = await asyncio.wait_for(proc.communicate(), TVTEST_CLIP_TIMEOUT_SECONDS)
+        if proc.returncode != 0:
+            raise ProcessingError(err.decode(errors="replace").strip()[-2000:])
+        os.replace(tmp, final)
+    finally:
+        await Transcoder._reap(proc)
+        tmp.unlink(missing_ok=True)
+
+
+def clean_tvtest_report(message: Dict[str, Any], levels: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """What the projector reported, as known fields of known types, with a verdict for
+    every clip: ok (smooth), rough (played, but did not keep up), failed or skipped."""
+    reports: Dict[str, Dict[str, Any]] = {}
+    raw = message.get("clips")
+    for entry in raw if isinstance(raw, list) else []:
+        if isinstance(entry, dict):
+            reports[str(entry.get("id"))] = entry
+    clips = []
+    for level in levels:
+        entry = reports.get(level["id"], {})
+        advance = max(0.0, min(finite(entry.get("advance")), 2.0))
+        frames = max(0, int(finite(entry.get("frames"))))
+        dropped = max(0, min(int(finite(entry.get("dropped"))), frames))
+        clip = {key: level[key] for key in ("id", "height", "fps", "kbps")}
+        if entry.get("outcome") == "played":
+            # Without frame counters (frames is 0) only the clock is left to judge by.
+            smooth = advance >= TVTEST_MIN_ADVANCE and dropped <= frames * TVTEST_MAX_DROPPED
+            clip.update(
+                status="ok" if smooth else "rough",
+                advance=round(advance, 3), frames=frames, dropped=dropped,
+            )
+        elif entry.get("outcome") == "failed":
+            reason = "download" if entry.get("reason") == "download" else "play"
+            clip.update(status="failed", reason=reason)
+        else:
+            clip.update(status="skipped")
+        clips.append(clip)
+    device = message.get("device")
+    device = device if isinstance(device, dict) else {}
+    speed = int(finite(message.get("speed_kbps")))
+    return {
+        "clips": clips,
+        "speed_kbps": speed if speed > 0 else None,
+        "device": {
+            "agent": str(device.get("agent") or "")[:300],
+            "screen_width": max(0, int(finite(device.get("screen_width")))),
+            "screen_height": max(0, int(finite(device.get("screen_height")))),
+        },
+    }
+
+
+def tvtest_fits(result: Dict[str, Any]) -> Dict[str, Any]:
+    """What the check says about the settings: the highest resolution and frame rate that
+    played smoothly (None if nothing did) and the bitrate ceiling the network allows
+    (None if the speed is unknown)."""
+    smooth = {clip["id"] for clip in result["clips"] if clip["status"] == "ok"}
+    base_fps = min(FPS_CHOICES)
+    height = None
+    for candidate in sorted(HEIGHTS):
+        if "%dp%d" % (candidate, base_fps) not in smooth:
+            break
+        height = candidate
+    fits: Dict[str, Any] = {"max_height": height, "max_fps": None, "network_kbps": None}
+    if height is not None:
+        fits["max_fps"] = max(f for f in FPS_CHOICES if "%dp%d" % (height, f) in smooth)
+    if result.get("speed_kbps"):
+        fits["network_kbps"] = int(result["speed_kbps"] * NETWORK_SHARE)
+    return fits
+
+
+def tvtest_record(data: Any) -> Dict[str, Any]:
+    """A check for read_json: a finished projector check as TvTest.finish saved it."""
+    parts = [(data, ("clips", "device", "fits", "finished", "speed_kbps"))]
+    parts += [(clip, ("id", "height", "fps", "status")) for clip in data["clips"]]
+    parts += [(data["device"], ("agent",)), (data["fits"], ("max_height", "max_fps"))]
+    for part, keys in parts:
+        missing = [key for key in keys if key not in part]
+        if missing:
+            raise KeyError(", ".join(missing))
+    return data
+
+
+class TvTest:
+    """The projector check: where a running one is, and the last finished one on disk."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.levels = tvtest_levels()
+        self.result: Optional[Dict[str, Any]] = None
+        self.status = "idle"  # idle → preparing (clips are generated) → running → idle
+        self.run: Optional[str] = None
+        self.step = 0
+        self.error: Optional[str] = None
+        self.seen = 0.0  # when the projector last reported
+        self.task: Optional[asyncio.Task] = None
+
+    def load(self) -> None:
+        self.result = read_json(self.path, tvtest_record)
+
+    def begin(self) -> str:
+        self.status, self.run, self.step, self.error = "preparing", secrets.token_hex(8), 0, None
+        return self.run
+
+    def fail(self, error: str) -> None:
+        self.status, self.run, self.error = "idle", None, error
+
+    def finish(self, message: Dict[str, Any]) -> None:
+        result = clean_tvtest_report(message, self.levels)
+        result["fits"] = tvtest_fits(result)
+        result["finished"] = time.time()
+        write_json(self.path, result)
+        self.result = result
+        self.status, self.run, self.error = "idle", None, None
+
+    def view(self) -> Dict[str, Any]:
+        if self.status == "running" and time.time() - self.seen > TVTEST_STALE_SECONDS:
+            self.fail("Проектор перестав відповідати під час перевірки")
+        return {
+            "status": self.status, "step": self.step, "steps": len(self.levels),
+            "error": self.error, "result": self.result,
+        }
 
 
 # ------------------------------------------------------------------ application
@@ -1279,7 +1582,6 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     pairing = Pairing()
     limiter = LoginLimiter()
     pair_start_limiter = LoginLimiter(PAIR_STARTS_PER_WINDOW, PAIR_CODE_TTL)
-    pair_code_limiter = LoginLimiter(10, LOGIN_WINDOW_SECONDS)
     hub = Hub()
     store = Store(settings.data_dir / "videos.json")
     # A wrong value in the environment must not stop the service either.
@@ -1291,6 +1593,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         defaults = Encoding()
     encoding = EncodingStore(settings.data_dir / "encoding.json", defaults)
     transcoder = Transcoder(settings, store, encoding)
+    tvtest = TvTest(settings.data_dir / "tvtest.json")
+    speed_payload: List[bytes] = []  # random bytes for the speed measurement, made on first use
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -1308,8 +1612,13 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         devices.load()
         queue.load()
         folders.load()
+        tvtest.load()
         await transcoder.start()
         yield
+        if tvtest.task:
+            tvtest.task.cancel()
+            with suppress(asyncio.CancelledError):
+                await tvtest.task
         await transcoder.stop()
 
     app = FastAPI(title="Promin", lifespan=lifespan, docs_url=None, redoc_url=None)
@@ -1324,6 +1633,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.state.queue = queue
     app.state.folders = folders
     app.state.pairing = pairing
+    app.state.tvtest = tvtest
     app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
     def fingerprint(username: str) -> Optional[str]:
@@ -1391,20 +1701,42 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         digest = await asyncio.to_thread(hash_password, password, salt)
         return user is not None and same(digest, user["hash"])
 
+    async def drop_lost_connections() -> None:
+        """Closes live connections whose login stopped working: a deleted user, a changed
+        password, a logout or a disconnected projector. Otherwise an open remote would keep
+        working until the phone reconnects."""
+        for ws in list(hub.remotes) + ([hub.tv] if hub.tv is not None else []):
+            if current_user(ws) is None:
+                with suppress(Exception):
+                    await ws.close(code=WS_UNAUTHORIZED)
+
     @app.exception_handler(NotAuthenticated)
     async def not_authenticated(request: Request, exc: NotAuthenticated) -> Response:
         if request.method == "GET" and not request.url.path.startswith("/api/"):
             path = request.url.path
-            target = "/login?next=" + path if path in LOGIN_NEXT and path != "/" else "/login"
+            if path == "/pair":  # a scanned QR code: come back to it after the login
+                path += "?t=" + request.query_params.get("t", "")
+            back = safe_next(path)
+            target = "/login?next=" + quote(back, safe="") if back != "/" else "/login"
             return RedirectResponse(target, status_code=303)
         return JSONResponse({"detail": "Потрібен вхід"}, status_code=401)
 
     def safe_next(value: Optional[str]) -> str:
-        return value if value in LOGIN_NEXT else "/"
+        if value in LOGIN_NEXT or (value and PAIR_NEXT_RE.fullmatch(value)):
+            return value
+        return "/"
+
+    def set_login_cookie(request: Request, response: Response, value: str) -> None:
+        # Behind an HTTPS proxy (see FORWARDED_ALLOW_IPS in .env.example) the cookie is marked
+        # Secure, so the browser never sends it over plain HTTP.
+        response.set_cookie(
+            COOKIE_NAME, value, max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax",
+            secure=request.url.scheme == "https",
+        )
 
     def login_page(error: str = "", status_code: int = 200, next_path: str = "/") -> HTMLResponse:
         page = (BASE_DIR / "templates" / "login.html").read_text(encoding="utf-8")
-        page = page.replace("{{error}}", html.escape(error)).replace("{{next}}", next_path)
+        page = page.replace("{{error}}", html.escape(error)).replace("{{next}}", html.escape(next_path))
         return HTMLResponse(page, status_code)
 
     @app.get("/login")
@@ -1438,13 +1770,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         limiter.forgive(ip, attempt)
         cookie = sessions.add(username, fingerprint(username) or "")
         response = RedirectResponse(next_path, status_code=303)
-        response.set_cookie(
-            COOKIE_NAME, cookie,
-            max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax",
-        )
+        set_login_cookie(request, response, cookie)
         return response
 
-    # The projector page is open to everyone: without a login it only shows a pairing code.
+    # The projector page is open to everyone: without a login it only shows a QR code to pair.
     @app.get("/tv", response_class=HTMLResponse)
     async def tv_page() -> str:
         return (BASE_DIR / "templates" / "tv.html").read_text(encoding="utf-8")
@@ -1458,22 +1787,27 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         started = pairing.start()
         if started is None:
             raise HTTPException(429, "Забагато пристроїв чекає на підключення.")
-        return started
+        # The phone opens this address from its camera, so it is the one the projector used.
+        url = "%spair?t=%s" % (request.base_url, started.pop("key"))
+        picture = io.BytesIO()
+        segno.make(url, error="m").save(
+            picture, kind="svg", xmldecl=False, svgns=True, omitsize=True,
+            scale=10, border=4, dark="#000", light="#fff",
+        )
+        return dict(started, url=url, qr=picture.getvalue().decode("utf-8"))
 
     @app.post("/api/pair/status")
-    async def pair_status(body: PairToken) -> Response:
+    async def pair_status(body: PairToken, request: Request) -> Response:
         pairing.purge()
         entry = pairing.pending.get(body.token)
         if entry is None:
             return JSONResponse({"status": "expired"})
         if entry["cookie"] is None:
             return JSONResponse({"status": "pending"})
-        # The code was approved on the phone: hand the projector its cookie; the code is spent.
+        # Approved on the phone: hand the projector its cookie; the QR code is spent.
         del pairing.pending[body.token]
         response = JSONResponse({"status": "approved"})
-        response.set_cookie(
-            COOKIE_NAME, entry["cookie"], max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax"
-        )
+        set_login_cookie(request, response, entry["cookie"])
         return response
 
     @app.post("/logout")
@@ -1486,6 +1820,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()
             if session is not None and same(digest, session["hash"]):
                 sessions.remove(session_id)
+                await drop_lost_connections()
         response = RedirectResponse("/login", status_code=303)
         response.delete_cookie(COOKIE_NAME)
         return response
@@ -1502,19 +1837,22 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         return require_auth(request)
 
     @router.post("/api/pair/approve")
-    async def pair_approve(body: PairCode, request: Request) -> Dict[str, Any]:
+    async def pair_approve(body: PairKey, request: Request) -> Dict[str, Any]:
         user = require_auth(request)
         if user["role"] == "device":
             raise HTTPException(403, "Підключати проектор може лише користувач")
-        if pair_code_limiter.blocked(user["username"]):
-            raise HTTPException(429, "Забагато спроб. Спробуйте знову за 15 хвилин.")
-        code = "".join(ch for ch in body.code if ch.isdigit())
-        entry = pairing.by_code(code) if len(code) == 6 else None
+        entry = pairing.by_key(body.key)
         if entry is None:
-            pair_code_limiter.fail(user["username"])
-            raise HTTPException(404, "Код не знайдено або він уже не діє")
+            raise HTTPException(404, "Цей QR-код уже не діє. Зчитайте новий з екрана проектора.")
         entry["cookie"] = devices.add("Проектор", user["username"])
         return {"ok": True}
+
+    @router.get("/pair", response_class=HTMLResponse)
+    async def pair_page(request: Request) -> Response:
+        """Where the QR code leads: the phone asks before it lets the projector in."""
+        if require_auth(request)["role"] == "device":
+            return RedirectResponse("/", status_code=303)
+        return HTMLResponse((BASE_DIR / "templates" / "pair.html").read_text(encoding="utf-8"))
 
     @admin.get("/api/devices")
     async def list_devices() -> Dict[str, Any]:
@@ -1525,10 +1863,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if not devices.remove(device_id):
             raise HTTPException(404, "Пристрій не знайдено")
         # If this projector is connected right now, playback on it stops at once.
-        tv = hub.tv
-        if tv is not None and getattr(tv.state, "device_id", None) == device_id:
-            with suppress(Exception):
-                await tv.close(code=WS_UNAUTHORIZED)
+        await drop_lost_connections()
         return Response(status_code=204)
 
     @router.get("/users", response_class=HTMLResponse)
@@ -1555,6 +1890,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "audio_bitrate_kbps": list(AUDIO_BITRATES_KBPS),
                 "x264_preset": list(X264_PRESETS),
             },
+            "suggested_kbps": SUGGESTED_KBPS,
         }
 
     @member.get("/api/settings")
@@ -1569,6 +1905,87 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(400, problem)
         encoding.set(chosen)
         return encoding_payload()
+
+    # --------------------------------------------------------- projector check
+
+    async def run_tvtest(run: str) -> None:
+        """Generates the clips that are missing, then hands the check to the projector."""
+        try:
+            settings.tvtest_dir.mkdir(parents=True, exist_ok=True)
+            for level in tvtest.levels:
+                await make_tvtest_clip(transcoder.ffmpeg or "", level, settings.tvtest_dir)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Could not make the clips for the projector check")
+            if tvtest.run == run:
+                tvtest.fail("Не вдалося підготувати тестові ролики на сервері")
+            return
+        if tvtest.run != run:
+            return
+        if hub.tv is None:
+            tvtest.fail("Проектор від'єднався, поки готувалися тестові ролики")
+            return
+        tvtest.status, tvtest.seen = "running", time.time()
+        await hub.send(hub.tv, {
+            "type": "command", "action": "test", "run": run,
+            "clips": [
+                dict(level, url="/tvtest/clip/" + level["id"]) for level in tvtest.levels
+            ],
+            "seconds": TVTEST_MEASURE_SECONDS,
+            "speed": {"url": "/tvtest/speed", "seconds": TVTEST_SPEED_SECONDS},
+            "limits": {"min_advance": TVTEST_MIN_ADVANCE, "max_dropped": TVTEST_MAX_DROPPED},
+        })
+
+    def tvtest_message(message: Dict[str, Any]) -> None:
+        """A report from the projector about the check that is running."""
+        if tvtest.status != "running" or message.get("run") != tvtest.run:
+            return
+        tvtest.seen = time.time()
+        if message.get("done"):
+            tvtest.finish(message)
+        elif message.get("aborted"):
+            tvtest.fail("Перевірку перервано: проектор зайнятий показом відео")
+        else:
+            tvtest.step = max(0, min(int(finite(message.get("step"))), len(tvtest.levels)))
+
+    @member.get("/api/tvtest")
+    async def get_tvtest() -> Dict[str, Any]:
+        return tvtest.view()
+
+    @member.post("/api/tvtest", status_code=202)
+    async def start_tvtest() -> Dict[str, Any]:
+        if tvtest.view()["status"] != "idle":
+            raise HTTPException(409, "Перевірка вже триває")
+        if not transcoder.ffmpeg:
+            raise HTTPException(503, "На сервері не встановлено ffmpeg")
+        if hub.tv is None:
+            raise HTTPException(409, "Проектор не на зв'язку: відкрийте на ньому сторінку /tv")
+        if hub.state is None or not hub.state["started"]:
+            raise HTTPException(409, "Спершу натисніть «Почати» на проекторі")
+        if hub.state["video_id"]:
+            raise HTTPException(409, "Спершу зупиніть відео на проекторі")
+        tvtest.task = asyncio.create_task(run_tvtest(tvtest.begin()))
+        return tvtest.view()
+
+    @router.get("/tvtest/clip/{level_id}")
+    async def tvtest_clip(level_id: str) -> FileResponse:
+        # The path is built from a known level, so the id never reaches the disk raw.
+        level = next((lv for lv in tvtest.levels if lv["id"] == level_id), None)
+        path = settings.tvtest_dir / tvtest_clip_name(level) if level else None
+        if path is None or not path.is_file():
+            raise HTTPException(404, "Ролик не знайдено")
+        return FileResponse(path, media_type="video/mp4", headers={"Cache-Control": "no-store"})
+
+    @router.get("/tvtest/speed")
+    async def tvtest_speed() -> Response:
+        """Bytes that cannot be compressed: the projector times how fast they arrive."""
+        if not speed_payload:
+            speed_payload.append(os.urandom(TVTEST_SPEED_CHUNK))
+        return Response(
+            speed_payload[0], media_type="application/octet-stream",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @admin.get("/api/users")
     async def list_users() -> Dict[str, Any]:
@@ -1604,6 +2021,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         check_new_password(body.password)
         if not await asyncio.to_thread(users.set_password, username, body.password):
             raise HTTPException(404, "Користувача не знайдено")
+        await drop_lost_connections()
         return Response(status_code=204)
 
     @admin.delete("/api/users/{username}", status_code=204)
@@ -1614,6 +2032,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(400, "Не можна видалити себе")
         if not users.remove(username):
             raise HTTPException(404, "Користувача не знайдено")
+        await drop_lost_connections()
         return Response(status_code=204)
 
     def public(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -1712,7 +2131,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(404, "Відео не знайдено")
         if item["status"] != "error":
             raise HTTPException(409, "Повторити можна лише відео з помилкою")
-        if not (settings.uploads_dir / item["source"]).is_file():
+        if not item.get("source") or not (settings.uploads_dir / item["source"]).is_file():
             raise HTTPException(409, "Оригінал не зберігся, завантажте відео ще раз")
         store.update(video_id, status="queued", error=None)
         transcoder.enqueue(video_id)
@@ -1737,17 +2156,19 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             path, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"}
         )
 
-    def delete_one(video_id: str) -> bool:
-        # Files are touched only for an id the store knew, so an id never reaches the glob raw.
-        if not store.remove(video_id):
-            return False
-        transcoder.cancel(video_id)
-        remove_files(settings, video_id)
-        return True
+    def delete_many(video_ids: List[str]) -> List[str]:
+        """Deletes videos and returns the ids that existed. The list is written once, however
+        many videos go: every write waits for the disk and holds up everything else."""
+        # Files are touched only for ids the store knew, so an id never reaches the glob raw.
+        deleted = store.remove_many(video_ids)
+        for video_id in deleted:
+            transcoder.cancel(video_id)
+            remove_files(settings, video_id)
+        return deleted
 
     @member.delete("/api/videos/{video_id}", status_code=204)
     async def delete_video(video_id: str) -> Response:
-        if not delete_one(video_id):
+        if not delete_many([video_id]):
             raise HTTPException(404, "Відео не знайдено")
         if queue.remove_videos({video_id}):
             await queue_changed()
@@ -1761,7 +2182,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(400, "Не вибрано жодного відео")
         if len(ids) > BATCH_DELETE_MAX:
             raise HTTPException(400, "За раз можна видалити щонайбільше %d відео" % BATCH_DELETE_MAX)
-        deleted = [video_id for video_id in ids if delete_one(video_id)]
+        deleted = delete_many(ids)
         gone = set(deleted)
         if queue.remove_videos(gone):
             await queue_changed()
@@ -1799,9 +2220,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         """Deletes a folder; its videos stay in the library without a folder."""
         if not folders.remove(folder_id):
             raise HTTPException(404, "Теку не знайдено")
-        for item in store.list():
-            if item.get("folder") == folder_id:
-                store.update(item["id"], folder=None)
+        store.clear_folder(folder_id)
         return Response(status_code=204)
 
     @member.post("/api/videos/{video_id}/folder")
@@ -1902,7 +2321,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         ws.state.device_id = user.get("device_id")
         if role == "tv":
             await serve_tv(ws)
-        elif role == "remote":
+        elif role == "remote" and user["role"] != "device":  # a projector only shows
             await serve_remote(ws)
         else:
             await ws.close(code=1008)
@@ -1910,6 +2329,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     async def serve_tv(ws: WebSocket) -> None:
         # There is one projector: a new connection takes over and the previous one is closed.
         previous, hub.tv, hub.state = hub.tv, ws, None
+        if tvtest.status == "running":  # the page that was running the check is gone
+            tvtest.fail("Сторінку проектора відкрили заново під час перевірки")
         if previous is not None:
             with suppress(Exception):
                 await previous.close(code=WS_REPLACED)
@@ -1928,6 +2349,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     playing = hub.state.get("video_id") if hub.state else None
                     if playing and message.get("video_id") == playing:
                         await play_next()
+                elif message.get("type") == "test":
+                    tvtest_message(message)
         except WebSocketDisconnect:
             pass
         except Exception:  # the page sent something that is not JSON
@@ -1936,6 +2359,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         finally:
             if hub.tv is ws:
                 hub.tv, hub.state = None, None
+                if tvtest.status == "running":
+                    tvtest.fail("Проектор від'єднався під час перевірки")
                 await hub.broadcast({"type": "tv", "connected": False})
 
     async def serve_remote(ws: WebSocket) -> None:
