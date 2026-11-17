@@ -218,6 +218,16 @@
     sendState();
   }
 
+  // The video is over (or cannot play): tell the server, which loads the next one from the
+  // queue if there is one. The report goes first so the server still knows what was playing.
+  function finished() {
+    if (!current) return;
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'ended', video_id: current.id }));
+    }
+    stop();
+  }
+
   function seekTo(position) {
     var duration = video.duration;
     if (!current || !duration || !isFinite(duration)) return;
@@ -341,8 +351,8 @@
   video.addEventListener('volumechange', sendState);
   video.addEventListener('loadedmetadata', sendState);
   video.addEventListener('timeupdate', updateBar);
-  video.addEventListener('ended', stop);
-  video.addEventListener('error', function () { if (current) stop(); });
+  video.addEventListener('ended', finished);
+  video.addEventListener('error', finished);
 
   document.getElementById('start-btn').addEventListener('click', function () {
     enterFullscreen();

@@ -18,6 +18,7 @@ The interface is in Ukrainian.
 - automatic transcoding with ffmpeg to 1080p H.264;
 - a `/tv` page for the projector's browser and a `/` page for the phone;
 - playback on the projector controlled from the phone over WebSocket;
+- a shared watch queue: the projector plays the next video by itself;
 - users with roles, and projectors paired with a code instead of a password.
 
 ## Stack
@@ -75,6 +76,14 @@ Any user chooses how new videos are encoded on the `/settings` page: the largest
 - The projector page and the remote reconnect by themselves after a connection drop.
 - The volume on the remote is the video's volume; the page cannot change the projector's system volume.
 - Any logged-in user can control playback, viewers included.
+
+### Watch queue
+
+- The queue button on a video card adds it to the end of the queue. The same video can be queued more than once.
+- The queue appears above the list: move entries up and down, remove them, clear the whole queue, or press play to start it on the projector.
+- When a video ends (or cannot be played), the projector starts the next one from the queue by itself. With an empty queue it stops, as before.
+- The next button on the remote takes the queue first and falls back to the next video in the library.
+- There is one queue for the projector, shared by everyone. It survives a server restart, and deleted videos drop out of it.
 
 ## Users and roles
 

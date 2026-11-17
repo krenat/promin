@@ -53,11 +53,12 @@ SESSION_IDLE_TTL = 30 * 24 * 3600
 SESSION_TOUCH_EVERY = 24 * 3600  # how often to record that a session was used
 LOGIN_MAX_BODY = 4096
 BATCH_DELETE_MAX = 500
+QUEUE_MAX = 200
 MIN_TOKEN_LENGTH = 12
 
 # Where login may redirect to, and which commands the remote may send to the projector.
 LOGIN_NEXT = ("/", "/tv")
-REMOTE_ACTIONS = ("load", "play", "pause", "seek", "seek_by", "volume", "stop")
+REMOTE_ACTIONS = ("load", "play", "pause", "seek", "seek_by", "volume", "stop", "next")
 WS_REPLACED = 4000  # the projector page was opened elsewhere
 WS_UNAUTHORIZED = 4401
 
@@ -820,6 +821,95 @@ class SessionStore:
             return True
 
 
+class QueueStore:
+    """The shared watch queue of the projector: what plays next, in order, in a JSON file.
+
+    Each entry has its own id, so one video can be queued twice and an entry can be
+    moved or removed without touching its twin.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._entries: List[Dict[str, str]] = []
+
+    def load(self) -> None:
+        with self._lock:
+            self._entries = []
+            if not self.path.exists():
+                return
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+                entries = [{"entry": str(e["entry"]), "video_id": str(e["video_id"])} for e in data]
+            except (ValueError, TypeError, KeyError):
+                # A lost queue is a small loss; a service that will not start is a big one.
+                log.warning("Ignoring %s: it does not hold a valid queue", self.path.name)
+                return
+            self._entries = entries
+
+    def _save(self) -> None:
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps(self._entries, indent=2), encoding="utf-8")
+        os.replace(tmp, self.path)
+
+    def list(self) -> List[Dict[str, str]]:
+        with self._lock:
+            return [dict(entry) for entry in self._entries]
+
+    def add(self, video_id: str) -> Optional[str]:
+        """Appends a video and returns the new entry id; None if the queue is full."""
+        with self._lock:
+            if len(self._entries) >= QUEUE_MAX:
+                return None
+            entry = secrets.token_hex(6)
+            self._entries.append({"entry": entry, "video_id": video_id})
+            self._save()
+            return entry
+
+    def remove(self, entry: str) -> bool:
+        with self._lock:
+            kept = [e for e in self._entries if e["entry"] != entry]
+            if len(kept) == len(self._entries):
+                return False
+            self._entries = kept
+            self._save()
+            return True
+
+    def remove_videos(self, video_ids: set) -> bool:
+        """Drops every entry of these videos. True if the queue changed."""
+        with self._lock:
+            kept = [e for e in self._entries if e["video_id"] not in video_ids]
+            if len(kept) == len(self._entries):
+                return False
+            self._entries = kept
+            self._save()
+            return True
+
+    def move(self, entry: str, position: int) -> bool:
+        with self._lock:
+            index = next((i for i, e in enumerate(self._entries) if e["entry"] == entry), None)
+            if index is None:
+                return False
+            item = self._entries.pop(index)
+            position = max(0, min(position, len(self._entries)))
+            self._entries.insert(position, item)
+            self._save()
+            return True
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries = []
+            self._save()
+
+    def pop(self) -> Optional[Dict[str, str]]:
+        with self._lock:
+            if not self._entries:
+                return None
+            entry = self._entries.pop(0)
+            self._save()
+            return entry
+
+
 class DeviceStore:
     """Paired projectors. Only a hash of the device cookie secret is stored."""
 
@@ -930,6 +1020,14 @@ class VideoIds(BaseModel):
     ids: List[str]
 
 
+class QueueAdd(BaseModel):
+    video_id: str
+
+
+class QueueMove(BaseModel):
+    position: int
+
+
 class EncodingBody(BaseModel):
     max_height: int
     max_fps: int
@@ -1009,6 +1107,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     users = UserStore(settings.data_dir / "users.json")
     sessions = SessionStore(settings.data_dir / "sessions.json")
     devices = DeviceStore(settings.data_dir / "devices.json")
+    queue = QueueStore(settings.data_dir / "queue.json")
     pairing = Pairing()
     limiter = LoginLimiter()
     pair_start_limiter = LoginLimiter(PAIR_STARTS_PER_WINDOW, PAIR_CODE_TTL)
@@ -1039,6 +1138,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         users.load()
         sessions.load()
         devices.load()
+        queue.load()
         await transcoder.start()
         yield
         await transcoder.stop()
@@ -1052,6 +1152,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.state.sessions = sessions
     app.state.hub = hub
     app.state.devices = devices
+    app.state.queue = queue
     app.state.pairing = pairing
     app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
@@ -1465,6 +1566,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     async def delete_video(video_id: str) -> Response:
         if not delete_one(video_id):
             raise HTTPException(404, "Відео не знайдено")
+        if queue.remove_videos({video_id}):
+            await queue_changed()
         return Response(status_code=204)
 
     @admin.post("/api/videos/delete")
@@ -1477,7 +1580,79 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(400, "За раз можна видалити щонайбільше %d відео" % BATCH_DELETE_MAX)
         deleted = [video_id for video_id in ids if delete_one(video_id)]
         gone = set(deleted)
+        if queue.remove_videos(gone):
+            await queue_changed()
         return {"deleted": deleted, "missing": [i for i in ids if i not in gone]}
+
+    # ------------------------------------------------------------- watch queue
+
+    def queue_view() -> List[Dict[str, Any]]:
+        """The queue as phones show it: only videos that can still be played."""
+        items = []
+        for entry in queue.list():
+            item = store.get(entry["video_id"])
+            if item and item["status"] == "ready":
+                items.append({
+                    "entry": entry["entry"], "video_id": item["id"], "name": item["name"],
+                    "duration": item.get("duration"), "thumb": bool(item.get("thumb")),
+                    "thumb_v": item.get("thumb_v"),
+                })
+        return items
+
+    async def queue_changed() -> Dict[str, Any]:
+        view = queue_view()
+        await hub.broadcast({"type": "queue", "queue": view})
+        return {"queue": view}
+
+    async def play_next() -> bool:
+        """Loads the first playable queue entry on the projector; False if there is none."""
+        if hub.tv is None:
+            return False
+        popped = played = False
+        while not played:
+            entry = queue.pop()
+            if entry is None:
+                break
+            popped = True
+            item = store.get(entry["video_id"])
+            if item and item["status"] == "ready":  # skip videos deleted since they were queued
+                await hub.send(hub.tv, {
+                    "type": "command", "action": "load", "video_id": item["id"], "name": item["name"],
+                })
+                played = True
+        if popped:
+            await queue_changed()
+        return played
+
+    @member.get("/api/queue")
+    async def get_queue() -> Dict[str, Any]:
+        return {"queue": queue_view()}
+
+    @member.post("/api/queue", status_code=201)
+    async def add_to_queue(body: QueueAdd) -> Dict[str, Any]:
+        item = store.get(body.video_id)
+        if not item or item["status"] != "ready":
+            raise HTTPException(404, "Це відео недоступне")
+        if queue.add(item["id"]) is None:
+            raise HTTPException(409, "У черзі вже %d відео" % QUEUE_MAX)
+        return await queue_changed()
+
+    @member.delete("/api/queue/{entry}")
+    async def remove_from_queue(entry: str) -> Dict[str, Any]:
+        if not queue.remove(entry):
+            raise HTTPException(404, "Цього відео вже немає в черзі")
+        return await queue_changed()
+
+    @member.post("/api/queue/{entry}/move")
+    async def move_in_queue(entry: str, body: QueueMove) -> Dict[str, Any]:
+        if not queue.move(entry, body.position):
+            raise HTTPException(404, "Цього відео вже немає в черзі")
+        return await queue_changed()
+
+    @member.delete("/api/queue")
+    async def clear_queue() -> Dict[str, Any]:
+        queue.clear()
+        return await queue_changed()
 
     @app.websocket("/ws")
     async def websocket(ws: WebSocket) -> None:
@@ -1511,9 +1686,17 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         try:
             while True:
                 message = await ws.receive_json()
-                if isinstance(message, dict) and message.get("type") == "state":
+                if not isinstance(message, dict):
+                    continue
+                if message.get("type") == "state":
                     hub.state = clean_state(message)
                     await hub.broadcast({"type": "state", **hub.state})
+                elif message.get("type") == "ended":
+                    # Only the video that is playing can end: a late or repeated report
+                    # must not skip the next one in the queue.
+                    playing = hub.state.get("video_id") if hub.state else None
+                    if playing and message.get("video_id") == playing:
+                        await play_next()
         except WebSocketDisconnect:
             pass
         except Exception:  # the page sent something that is not JSON
@@ -1529,6 +1712,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         await hub.send(ws, {"type": "tv", "connected": hub.tv is not None})
         if hub.state is not None:
             await hub.send(ws, {"type": "state", **hub.state})
+        # An empty queue is not sent: the page clears its copy whenever the connection drops.
+        view = queue_view()
+        if view:
+            await hub.send(ws, {"type": "queue", "queue": view})
         try:
             while True:
                 message = await ws.receive_json()
@@ -1539,6 +1726,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     continue
                 if hub.tv is None:
                     await hub.send(ws, {"type": "error", "message": "Проектор не на зв'язку"})
+                    continue
+                if action == "next":
+                    if not await play_next():
+                        await hub.send(ws, {"type": "error", "message": "Черга порожня"})
                     continue
                 command: Dict[str, Any] = {"type": "command", "action": action}
                 if action == "load":
