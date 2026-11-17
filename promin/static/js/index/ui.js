@@ -3,7 +3,8 @@
 export var message = document.getElementById('message');
 
 export var ICON_PAUSE = 'M6 5h4v14H6zM14 5h4v14h-4z';
-export var ICON_PLAY = 'M7 4.5v15l12-7.5z';
+// The rounded triangle of the logo, fitted into the 24-unit box of the other icons.
+export var ICON_PLAY = 'M6 5.1c0-1.38 1.5-2.28 2.7-1.56l11.4 6.9c1.14.72 1.14 2.4 0 3.12l-11.4 6.9c-1.2.72-2.7-.18-2.7-1.56z';
 export var ICON_ADD = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h12v2H3zm0 4h12v2H3zm0 4h8v2H3zm14 0v-3h2v3h3v2h-3v3h-2v-3h-3v-2z"/></svg>';
 export var ICON_DONE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 16.6 4.9 12l-1.4 1.4 6 6 11-11-1.4-1.4z"/></svg>';
 export var ICON_UP = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.4 15.4 12 10.8l4.6 4.6L18 14l-6-6-6 6z"/></svg>';
