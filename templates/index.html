@@ -304,6 +304,33 @@
     color: var(--text); background: rgba(15, 17, 21, 0.6);
   }
   details.menu .pop { right: 0; top: 44px; min-width: 140px; }
+
+  /* ---------- selecting several videos (administrators) ---------- */
+  #select-bar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    margin: -8px 0 16px;
+  }
+  #select-bar button { min-height: 40px; padding: 0 16px; font-size: 14px; }
+  body.selecting #select-bar {
+    position: sticky; top: 0; z-index: 3;
+    margin: -8px -16px 16px; padding: 8px 16px;
+    background: var(--bg); border-bottom: 1px solid var(--line);
+  }
+  #select-count { flex: 1 0 100%; font-weight: 600; }
+  body.selecting #select-bar button { flex: 1; }
+  .danger-btn { background: var(--danger); color: var(--on-accent); }
+  body.selecting details.menu, body.selecting .card .actions { display: none; }
+  body.selecting .thumb .play { display: none; }
+  .check {
+    position: absolute; top: 8px; left: 8px;
+    width: 28px; height: 28px; border-radius: 50%;
+    display: grid; place-items: center;
+    border: 2px solid var(--text); background: rgba(15, 17, 21, 0.6);
+  }
+  .check svg { width: 16px; height: 16px; fill: var(--on-accent); visibility: hidden; }
+  .card.selected { outline: 3px solid var(--accent); outline-offset: -3px; }
+  .card.selected .check { background: var(--accent); border-color: var(--accent); }
+  .card.selected .check svg { visibility: visible; }
 </style>
 </head>
 <body>
@@ -337,6 +364,13 @@
   </div>
   <p id="message" role="alert"></p>
   <p id="disk" hidden></p>
+  <div id="select-bar" hidden>
+    <button id="select-start" class="outline" type="button">Вибрати кілька</button>
+    <span id="select-count" hidden></span>
+    <button id="select-all" class="outline" type="button" hidden>Усі</button>
+    <button id="select-delete" class="danger-btn" type="button" hidden disabled>Видалити</button>
+    <button id="select-cancel" class="outline" type="button" hidden>Скасувати</button>
+  </div>
 
   <section id="list" aria-live="polite"></section>
 
@@ -413,6 +447,8 @@
   var maxUpload = Infinity;
   var isAdmin = false;
   var canManage = false;  // a person with a login, not a paired projector
+  var selecting = false;  // administrators pick several videos to delete at once
+  var selected = {};      // id → true
   var videosCache = [];
   var ws = null;
   var wsRetry = 1000;
@@ -477,11 +513,17 @@
     var card = el('article', 'card');
     var ready = item.status === 'ready';
 
-    // The thumbnail is the "watch here" button.
+    // The thumbnail is the "watch here" button; while selecting, it ticks the video instead.
     var thumb = el('button', 'thumb');
     thumb.type = 'button';
-    thumb.disabled = !ready;
-    thumb.setAttribute('aria-label', 'Дивитись тут: ' + item.name);
+    thumb.disabled = !ready && !selecting;
+    if (selecting) {
+      thumb.setAttribute('aria-label', 'Вибрати: ' + item.name);
+      thumb.setAttribute('aria-pressed', String(!!selected[item.id]));
+      if (selected[item.id]) card.className += ' selected';
+    } else {
+      thumb.setAttribute('aria-label', 'Дивитись тут: ' + item.name);
+    }
     var picture = el('img', item.thumb ? 'cover' : 'mark');
     picture.src = item.thumb ? '/thumb/' + item.id + '?v=' + (item.thumb_v || 1) : '/static/logo.svg';
     picture.alt = '';
@@ -493,7 +535,15 @@
       thumb.appendChild(play);
     }
     if (item.duration) thumb.appendChild(el('span', 'duration', formatDuration(item.duration)));
-    thumb.addEventListener('click', function () { openPlayer(item); });
+    if (selecting) {
+      var check = el('span', 'check');
+      check.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 16.6 4.9 12l-1.4 1.4 6 6 11-11-1.4-1.4z"/></svg>';
+      thumb.appendChild(check);
+    }
+    thumb.addEventListener('click', function () {
+      if (selecting) toggleSelected(item.id);
+      else openPlayer(item);
+    });
     card.appendChild(thumb);
 
     if (canManage) {
@@ -566,7 +616,7 @@
 
   function renderList() {
     // Do not redraw an unchanged list, so that an open menu stays open.
-    var snapshot = JSON.stringify([videosCache, canCast()]);
+    var snapshot = JSON.stringify([videosCache, canCast(), selecting, selected]);
     if (snapshot === lastRendered) return;
     lastRendered = snapshot;
     list.textContent = '';
@@ -576,6 +626,83 @@
     }
     videosCache.forEach(function (item) { list.appendChild(renderCard(item)); });
   }
+
+  // ------------------------------------------------- selecting several videos
+
+  function selectedIds() {
+    return videosCache.filter(function (v) { return selected[v.id]; }).map(function (v) { return v.id; });
+  }
+
+  function updateSelectBar() {
+    var count = selectedIds().length;
+    document.body.classList.toggle('selecting', selecting);
+    document.getElementById('select-start').hidden = selecting || !videosCache.length;
+    ['select-count', 'select-all', 'select-delete', 'select-cancel'].forEach(function (id) {
+      document.getElementById(id).hidden = !selecting;
+    });
+    document.getElementById('select-count').textContent = 'Вибрано: ' + count;
+    document.getElementById('select-delete').disabled = !count;
+    document.getElementById('select-all').textContent =
+      count && count === videosCache.length ? 'Зняти всі' : 'Усі';
+  }
+
+  function setSelecting(on) {
+    selecting = on;
+    selected = {};
+    renderList();
+    updateSelectBar();
+  }
+
+  function toggleSelected(id) {
+    if (selected[id]) delete selected[id];
+    else selected[id] = true;
+    renderList();
+    updateSelectBar();
+  }
+
+  function deleteSelected() {
+    var ids = selectedIds();
+    if (!ids.length) return;
+    var what = ids.length === 1 ? '1 відео' : ids.length + ' відео';
+    if (!confirm('Видалити ' + what + '? Відновити їх не вдасться.')) return;
+    message.textContent = '';
+    var button = document.getElementById('select-delete');
+    button.disabled = true;
+    fetch('/api/videos/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: ids })
+    }).then(function (r) {
+      if (r.status === 401) { location.href = '/login'; throw new Error('login'); }
+      if (!r.ok) {
+        return r.text().then(function (body) {
+          throw new Error(errorText(body, 'Не вдалося видалити відео.'));
+        });
+      }
+      return r.json();
+    }).then(function (result) {
+      setSelecting(false);
+      if (result.missing.length) message.textContent = 'Частину відео вже видалив хтось інший.';
+      return refresh();
+    }).catch(function (error) {
+      button.disabled = false;
+      if (error.message !== 'login') {
+        message.textContent = error.message === 'Failed to fetch'
+          ? 'Немає зв’язку із сервером. Спробуйте ще раз.' : error.message;
+      }
+    });
+  }
+
+  document.getElementById('select-start').addEventListener('click', function () { setSelecting(true); });
+  document.getElementById('select-cancel').addEventListener('click', function () { setSelecting(false); });
+  document.getElementById('select-delete').addEventListener('click', deleteSelected);
+  document.getElementById('select-all').addEventListener('click', function () {
+    var all = selectedIds().length === videosCache.length;
+    selected = {};
+    if (!all) videosCache.forEach(function (v) { selected[v.id] = true; });
+    renderList();
+    updateSelectBar();
+  });
 
   // ------------------------------------------------------------------ remote
 
@@ -768,6 +895,11 @@
         disk.textContent = 'Вільно на сервері: ' + formatSize(data.disk.free);
         schedule(data);
         videosCache = data.videos;
+        // Videos deleted elsewhere drop out of the selection.
+        var present = {};
+        videosCache.forEach(function (v) { present[v.id] = true; });
+        Object.keys(selected).forEach(function (id) { if (!present[id]) delete selected[id]; });
+        if (isAdmin) updateSelectBar();
         renderList();
       })
       .catch(function () {
@@ -868,7 +1000,9 @@
   });
   document.getElementById('player-close').addEventListener('click', closePlayer);
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && !player.hidden) closePlayer();
+    if (e.key !== 'Escape') return;
+    if (!player.hidden) closePlayer();
+    else if (selecting) setSelecting(false);
   });
   document.addEventListener('click', function (e) {
     var menus = document.querySelectorAll('details.menu[open]');
@@ -886,6 +1020,7 @@
       isAdmin = me.role === 'admin';
       document.getElementById('who').textContent = 'Ви увійшли як ' + me.username;
       canManage = me.role !== 'device';
+      document.getElementById('select-bar').hidden = !isAdmin;
       uploadBtn.hidden = !canManage;
       disk.hidden = !canManage;
       document.getElementById('users-link').hidden = !isAdmin;

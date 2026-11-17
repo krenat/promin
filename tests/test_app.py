@@ -895,6 +895,7 @@ def test_projector_can_only_show(client, projector):
     assert projector.get("/api/videos").status_code == 200
     assert upload(projector, b"x" * 100).status_code == 403
     assert projector.delete("/api/videos/abc").status_code == 403
+    assert projector.post("/api/videos/delete", json={"ids": ["abc"]}).status_code == 403
     assert projector.post("/api/videos/abc/retry").status_code == 403
     assert projector.get("/api/settings").status_code == 403
     assert projector.put("/api/settings", json=NEW_ENCODING).status_code == 403
@@ -1165,3 +1166,73 @@ def test_saved_settings_apply_to_the_next_upload(client, tmp_path, big_clip):
     assert video["status"] == "ready", video
     stream = probe_video(tmp_path / "videos" / (video["id"] + ".mp4"))
     assert (stream["width"], stream["height"]) == (1280, 720)
+
+
+# --------------------------------------------------------------- batch delete
+
+
+def add_fake_video(client: TestClient, tmp_path: Path, video_id: str, status: str = "ready") -> None:
+    """Puts a video straight into the store, with files, without running ffmpeg."""
+    store = client.app.state.store
+    store.add({
+        "id": video_id, "name": video_id + ".mp4", "size": 1, "status": status,
+        "created": time.time(), "source": video_id + ".mp4", "duration": 1.0,
+        "thumb": True, "error": None,
+    })
+    (tmp_path / "videos" / (video_id + ".mp4")).write_bytes(b"v")
+    (tmp_path / "thumbs" / (video_id + ".jpg")).write_bytes(b"t")
+
+
+def video_ids(client: TestClient) -> set:
+    return {v["id"] for v in client.get("/api/videos").json()["videos"]}
+
+
+def test_admin_deletes_several_videos_at_once(client, tmp_path):
+    for video_id in ("aaa", "bbb", "ccc"):
+        add_fake_video(client, tmp_path, video_id)
+    r = client.post("/api/videos/delete", json={"ids": ["aaa", "ccc", "aaa"]})
+    assert r.status_code == 200
+    assert r.json() == {"deleted": ["aaa", "ccc"], "missing": []}
+    assert video_ids(client) == {"bbb"}
+    left = sorted(p.name for p in (tmp_path / "videos").iterdir()) + sorted(
+        p.name for p in (tmp_path / "thumbs").iterdir()
+    )
+    assert left == ["bbb.mp4", "bbb.jpg"]
+
+
+def test_batch_delete_reports_videos_already_gone(client, tmp_path):
+    add_fake_video(client, tmp_path, "aaa")
+    r = client.post("/api/videos/delete", json={"ids": ["aaa", "nope"]})
+    assert r.status_code == 200
+    assert r.json() == {"deleted": ["aaa"], "missing": ["nope"]}
+
+
+def test_batch_delete_also_removes_videos_in_processing(client, tmp_path):
+    add_fake_video(client, tmp_path, "aaa", status="queued")
+    add_fake_video(client, tmp_path, "bbb", status="error")
+    assert client.post("/api/videos/delete", json={"ids": ["aaa", "bbb"]}).json()["missing"] == []
+    assert video_ids(client) == set()
+
+
+def test_batch_delete_ids_never_reach_the_file_system(client, tmp_path):
+    add_fake_video(client, tmp_path, "aaa")
+    # A glob pattern is not a known id, so no file is touched.
+    r = client.post("/api/videos/delete", json={"ids": ["*", "../*", "a*"]})
+    assert r.json() == {"deleted": [], "missing": ["*", "../*", "a*"]}
+    assert (tmp_path / "videos" / "aaa.mp4").is_file()
+
+
+@pytest.mark.parametrize("payload", [{"ids": []}, {"ids": [str(i) for i in range(501)]}, {}, {"ids": "aaa"}])
+def test_invalid_batch_delete_is_rejected(client, tmp_path, payload):
+    add_fake_video(client, tmp_path, "aaa")
+    assert client.post("/api/videos/delete", json=payload).status_code in (400, 422)
+    assert video_ids(client) == {"aaa"}
+
+
+def test_only_admin_deletes_in_batches(client, viewer, anon, tmp_path):
+    add_fake_video(client, tmp_path, "aaa")
+    assert viewer.post("/api/videos/delete", json={"ids": ["aaa"]}).status_code == 403
+    assert anon.post("/api/videos/delete", json={"ids": ["aaa"]}).status_code == 401
+    assert video_ids(client) == {"aaa"}
+    # A viewer still deletes one video at a time.
+    assert viewer.delete("/api/videos/aaa").status_code == 204
