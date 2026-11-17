@@ -21,7 +21,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -74,10 +74,18 @@ PBKDF2_ROUNDS = 200_000
 LOGIN_MAX_FAILURES = 5
 LOGIN_WINDOW_SECONDS = 15 * 60
 
-# Limits the finished video has to fit into.
-MAX_WIDTH = 1920
-MAX_HEIGHT = 1080
-MAX_FPS = 60
+# What the administrator may choose on the settings page. The frame is 16:9.
+HEIGHTS = {720: 1280, 1080: 1920, 1440: 2560, 2160: 3840}  # height → width
+FPS_CHOICES = (30, 60)
+CRF_RANGE = (16, 28)
+BITRATE_RANGE_KBPS = (1000, 60000)
+AUDIO_BITRATES_KBPS = (96, 128, 160, 192, 256)
+X264_PRESETS = ("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow")
+# Codecs that need fewer bits than H.264 for the same picture: when transcoding from them,
+# the bitrate ceiling is the source bitrate with this headroom.
+EFFICIENT_CODECS = {"hevc", "av1", "vp9", "vvc"}
+EFFICIENT_CODEC_HEADROOM = 1.8
+MIN_RATE_KBPS = 300  # a ceiling below this only makes the picture fall apart
 HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}  # PQ (HDR10) and HLG
 
 # HDR → SDR chains. The first needs ffmpeg with libzimg, the second a recent swscale.
@@ -126,6 +134,75 @@ class Settings:
     @property
     def thumbs_dir(self) -> Path:
         return self.data_dir / "thumbs"
+
+
+@dataclass(frozen=True)
+class Encoding:
+    """How newly uploaded videos are encoded. Videos that are already processed stay as is."""
+
+    max_height: int = 1080
+    max_fps: int = 60
+    max_bitrate_kbps: int = 8000
+    crf: int = 21
+    audio_bitrate_kbps: int = 160
+    x264_preset: str = "veryfast"
+
+    @property
+    def max_width(self) -> int:
+        return HEIGHTS[self.max_height]
+
+    def problem(self) -> Optional[str]:
+        """Why these values cannot be used, as text for the user; None if they can."""
+        if self.max_height not in HEIGHTS:
+            return "Невідома роздільність"
+        if self.max_fps not in FPS_CHOICES:
+            return "Невідома частота кадрів"
+        if not BITRATE_RANGE_KBPS[0] <= self.max_bitrate_kbps <= BITRATE_RANGE_KBPS[1]:
+            return "Бітрейт відео має бути від %d до %d кбіт/с" % BITRATE_RANGE_KBPS
+        if not CRF_RANGE[0] <= self.crf <= CRF_RANGE[1]:
+            return "Якість (CRF) має бути від %d до %d" % CRF_RANGE
+        if self.audio_bitrate_kbps not in AUDIO_BITRATES_KBPS:
+            return "Невідомий бітрейт звуку"
+        if self.x264_preset not in X264_PRESETS:
+            return "Невідомий пресет"
+        return None
+
+
+class EncodingStore:
+    """Encoding chosen on the settings page; until then, the defaults from the environment."""
+
+    def __init__(self, path: Path, defaults: Encoding) -> None:
+        self.path = path
+        self.defaults = defaults
+        self._lock = threading.Lock()
+        self._current = defaults
+
+    def load(self) -> None:
+        with self._lock:
+            self._current = self.defaults
+            if not self.path.exists():
+                return
+            try:
+                saved = json.loads(self.path.read_text(encoding="utf-8"))
+                merged = Encoding(**{**asdict(self.defaults), **saved})
+            except (ValueError, TypeError):
+                merged = None
+            # A damaged or outdated file must not stop the service: fall back to the defaults.
+            if merged is None or merged.problem():
+                log.warning("Ignoring %s: it does not hold valid encoding settings", self.path.name)
+                return
+            self._current = merged
+
+    def get(self) -> Encoding:
+        with self._lock:
+            return self._current
+
+    def set(self, encoding: Encoding) -> None:
+        with self._lock:
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            tmp.write_text(json.dumps(asdict(encoding), indent=2), encoding="utf-8")
+            os.replace(tmp, self.path)
+            self._current = encoding
 
 
 class Store:
@@ -207,7 +284,7 @@ def stream_rotation(stream: Dict[str, Any]) -> int:
         return 0
 
 
-def plan_encode(probe: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
+def plan_encode(probe: Dict[str, Any], encoding: Encoding) -> Dict[str, Any]:
     """Decides from the ffprobe output how much work is needed.
 
     remux: the file already fits, only repackage it;
@@ -249,10 +326,10 @@ def plan_encode(probe: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         and video.get("pix_fmt") == "yuv420p"
         and not hdr
         and stream_rotation(video) == 0
-        and 0 < int(video.get("width") or 0) <= MAX_WIDTH
-        and 0 < int(video.get("height") or 0) <= MAX_HEIGHT
-        and 0 < fps <= MAX_FPS + 0.5
-        and 0 < bitrate <= settings.max_bitrate_kbps * 1000 * 1.25
+        and 0 < int(video.get("width") or 0) <= encoding.max_width
+        and 0 < int(video.get("height") or 0) <= encoding.max_height
+        and 0 < fps <= encoding.max_fps + 0.5
+        and 0 < bitrate <= encoding.max_bitrate_kbps * 1000 * 1.25
     )
     # Keep the audio as is if it is mono or stereo AAC.
     audio_ok = audio is None or (
@@ -264,11 +341,18 @@ def plan_encode(probe: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
         mode = "audio"
     else:
         mode = "transcode"
+    # A transcoded file gains nothing from more bits than the source had, so the ceiling
+    # follows the source bitrate; more efficient codecs get headroom to keep their quality.
+    max_rate = encoding.max_bitrate_kbps
+    if bitrate > 0:
+        headroom = EFFICIENT_CODEC_HEADROOM if video.get("codec_name") in EFFICIENT_CODECS else 1.0
+        max_rate = min(max_rate, max(MIN_RATE_KBPS, int(bitrate / 1000 * headroom)))
     return {
         "mode": mode,
         "duration": duration,
         "fps": fps,
         "hdr": hdr,
+        "max_rate_kbps": max_rate,
     }
 
 
@@ -277,42 +361,43 @@ def build_ffmpeg_args(
     src: Path,
     dst: Path,
     plan: Dict[str, Any],
-    settings: Settings,
+    encoding: Encoding,
     hdr_filter: Optional[str],
 ) -> List[str]:
     args = [ffmpeg, "-nostdin", "-y", "-v", "error", "-i", str(src)]
     args += ["-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn"]
+    audio_rate = "%dk" % encoding.audio_bitrate_kbps
     if plan["mode"] == "remux":
         args += ["-c", "copy"]
     elif plan["mode"] == "audio":
         # The picture is copied losslessly; only the audio is re-encoded.
-        args += ["-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-ac", "2"]
+        args += ["-c:v", "copy", "-c:a", "aac", "-b:a", audio_rate, "-ac", "2"]
     else:
         tonemapped = bool(plan["hdr"] and hdr_filter)
-        # Fit into 1920×1080 without upscaling; ffmpeg applies rotation by itself.
+        # Fit into the frame without upscaling; ffmpeg applies rotation by itself.
         filters = [
             "scale=w='min(%d,iw)':h='min(%d,ih)'"
             ":force_original_aspect_ratio=decrease:force_divisible_by=2"
-            % (MAX_WIDTH, MAX_HEIGHT)
+            % (encoding.max_width, encoding.max_height)
         ]
         # Tone mapping goes after downscaling: on 4K it is three times slower.
         if tonemapped:
             filters.append(hdr_filter)
-        if plan["fps"] > MAX_FPS + 0.5:
-            filters.append("fps=%d" % MAX_FPS)
+        if plan["fps"] > encoding.max_fps + 0.5:
+            filters.append("fps=%d" % encoding.max_fps)
         filters.append("format=yuv420p")
-        rate = settings.max_bitrate_kbps
+        rate = plan["max_rate_kbps"]
         args += [
             "-vf", ",".join(filters),
             "-c:v", "libx264",
-            "-preset", settings.x264_preset,
+            "-preset", encoding.x264_preset,
             "-profile:v", "high",
-            "-crf", "21",
+            "-crf", str(encoding.crf),
             "-maxrate", "%dk" % rate,
             "-bufsize", "%dk" % (rate * 2),
             # A keyframe every 2 seconds, for fast seeking.
             "-force_key_frames", "expr:gte(t,n_forced*2)",
-            "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+            "-c:a", "aac", "-b:a", audio_rate, "-ac", "2",
         ]
         if tonemapped:
             args += ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"]
@@ -347,9 +432,10 @@ def detect_hdr_filter(ffmpeg: str) -> Optional[str]:
 class Transcoder:
     """A queue with a single worker: videos are processed one at a time."""
 
-    def __init__(self, settings: Settings, store: Store) -> None:
+    def __init__(self, settings: Settings, store: Store, encoding: EncodingStore) -> None:
         self.settings = settings
         self.store = store
+        self.encoding = encoding
         self.ffmpeg = shutil.which("ffmpeg")
         self.ffprobe = shutil.which("ffprobe")
         self.hdr_filter: Optional[str] = None
@@ -445,8 +531,10 @@ class Transcoder:
             if not src.is_file():
                 raise ProcessingError("Оригінал відео не знайдено на сервері")
 
-            plan = plan_encode(await self._probe(src), settings)
-            args = build_ffmpeg_args(self.ffmpeg, src, tmp, plan, settings, self.hdr_filter)
+            # The settings in force when processing starts apply to the whole video.
+            encoding = self.encoding.get()
+            plan = plan_encode(await self._probe(src), encoding)
+            args = build_ffmpeg_args(self.ffmpeg, src, tmp, plan, encoding, self.hdr_filter)
             code, err = await self._ffmpeg(args, video_id, plan["duration"])
 
             if self.store.get(video_id) is None:  # deleted while processing
@@ -837,6 +925,15 @@ class NewPassword(BaseModel):
     password: str
 
 
+class EncodingBody(BaseModel):
+    max_height: int
+    max_fps: int
+    max_bitrate_kbps: int
+    crf: int
+    audio_bitrate_kbps: int
+    x264_preset: str
+
+
 # ----------------------------------------------------------------------- remote
 
 
@@ -913,7 +1010,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     pair_code_limiter = LoginLimiter(10, LOGIN_WINDOW_SECONDS)
     hub = Hub()
     store = Store(settings.data_dir / "videos.json")
-    transcoder = Transcoder(settings, store)
+    # A wrong value in the environment must not stop the service either.
+    defaults = Encoding(
+        max_bitrate_kbps=settings.max_bitrate_kbps, x264_preset=settings.x264_preset
+    )
+    if defaults.problem():
+        log.warning("Ignoring PROMIN_MAX_BITRATE_KBPS and PROMIN_X264_PRESET: %s", defaults.problem())
+        defaults = Encoding()
+    encoding = EncodingStore(settings.data_dir / "encoding.json", defaults)
+    transcoder = Transcoder(settings, store, encoding)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -925,6 +1030,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         ):
             leftover.unlink(missing_ok=True)
         store.load()
+        encoding.load()
         users.load()
         sessions.load()
         devices.load()
@@ -936,6 +1042,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.state.settings = settings
     app.state.store = store
     app.state.transcoder = transcoder
+    app.state.encoding = encoding
     app.state.users = users
     app.state.sessions = sessions
     app.state.hub = hub
@@ -984,6 +1091,13 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         user = current_user(request)
         if user is None:
             raise NotAuthenticated()
+        return user
+
+    def require_member(request: Request) -> Dict[str, Any]:
+        """A person with a login, as opposed to a paired projector."""
+        user = require_auth(request)
+        if user["role"] == "device":
+            raise HTTPException(403, "Проектор може лише показувати відео")
         return user
 
     def require_admin(request: Request) -> Dict[str, Any]:
@@ -1100,8 +1214,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         response.delete_cookie(COOKIE_NAME)
         return response
 
-    # router: everyone who is logged in (video files included); admin: administrators only.
+    # router: everyone who is logged in, projectors included (pages, the list, video files);
+    # member: people with a login (adding and deleting videos, encoding settings);
+    # admin: administrators only (users and paired projectors).
     router = APIRouter(dependencies=[Depends(require_auth)])
+    member = APIRouter(dependencies=[Depends(require_member)])
     admin = APIRouter(dependencies=[Depends(require_admin)])
 
     @router.get("/api/me")
@@ -1143,6 +1260,39 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if require_auth(request)["role"] != "admin":
             return RedirectResponse("/", status_code=303)
         return HTMLResponse((BASE_DIR / "templates" / "users.html").read_text(encoding="utf-8"))
+
+    @router.get("/settings", response_class=HTMLResponse)
+    async def settings_page(request: Request) -> Response:
+        if require_auth(request)["role"] == "device":
+            return RedirectResponse("/", status_code=303)
+        return HTMLResponse((BASE_DIR / "templates" / "settings.html").read_text(encoding="utf-8"))
+
+    def encoding_payload() -> Dict[str, Any]:
+        return {
+            "encoding": asdict(encoding.get()),
+            "defaults": asdict(encoding.defaults),
+            "choices": {
+                "max_height": sorted(HEIGHTS),
+                "max_fps": list(FPS_CHOICES),
+                "max_bitrate_kbps": list(BITRATE_RANGE_KBPS),
+                "crf": list(CRF_RANGE),
+                "audio_bitrate_kbps": list(AUDIO_BITRATES_KBPS),
+                "x264_preset": list(X264_PRESETS),
+            },
+        }
+
+    @member.get("/api/settings")
+    async def get_settings() -> Dict[str, Any]:
+        return encoding_payload()
+
+    @member.put("/api/settings")
+    async def put_settings(body: EncodingBody) -> Dict[str, Any]:
+        chosen = Encoding(**body.model_dump())
+        problem = chosen.problem()
+        if problem:
+            raise HTTPException(400, problem)
+        encoding.set(chosen)
+        return encoding_payload()
 
     @admin.get("/api/users")
     async def list_users() -> Dict[str, Any]:
@@ -1209,7 +1359,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             "max_upload": settings.max_upload_bytes,
         }
 
-    @admin.post("/api/videos", status_code=201)
+    @member.post("/api/videos", status_code=201)
     async def upload_video(request: Request) -> Dict[str, Any]:
         name = clean_name(request.headers.get("x-filename", ""))
         ext = Path(name).suffix.lower()
@@ -1266,7 +1416,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         transcoder.enqueue(video_id)
         return public(item)
 
-    @admin.post("/api/videos/{video_id}/retry")
+    @member.post("/api/videos/{video_id}/retry")
     async def retry_video(video_id: str) -> Dict[str, Any]:
         item = store.get(video_id)
         if not item:
@@ -1298,7 +1448,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             path, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"}
         )
 
-    @admin.delete("/api/videos/{video_id}", status_code=204)
+    @member.delete("/api/videos/{video_id}", status_code=204)
     async def delete_video(video_id: str) -> Response:
         if not store.remove(video_id):
             raise HTTPException(404, "Відео не знайдено")
@@ -1389,6 +1539,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             hub.remotes.discard(ws)
 
     app.include_router(router)
+    app.include_router(member)
     app.include_router(admin)
     return app
 

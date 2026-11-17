@@ -343,6 +343,7 @@
   <footer>
     <span class="who" id="who"></span>
     <a id="pair-link" href="#pair">Підключити проектор</a>
+    <a id="settings-link" href="/settings" hidden>Налаштування</a>
     <a id="users-link" href="/users" hidden>Користувачі</a>
     <form method="post" action="/logout"><button class="outline" type="submit">Вийти</button></form>
   </footer>
@@ -411,6 +412,7 @@
   var playerTitle = document.getElementById('player-title');
   var maxUpload = Infinity;
   var isAdmin = false;
+  var canManage = false;  // a person with a login, not a paired projector
   var videosCache = [];
   var ws = null;
   var wsRetry = 1000;
@@ -494,7 +496,7 @@
     thumb.addEventListener('click', function () { openPlayer(item); });
     card.appendChild(thumb);
 
-    if (isAdmin) {
+    if (canManage) {
       var menu = el('details', 'menu');
       var summary = el('summary', null, '⋯');
       summary.setAttribute('aria-label', 'Меню відео: ' + item.name);
@@ -538,7 +540,7 @@
         command('load', { video_id: item.id });
       });
       actions.appendChild(cast);
-    } else if (item.status === 'error' && isAdmin) {
+    } else if (item.status === 'error' && canManage) {
       var again = el('button', 'outline', 'Повторити');
       again.type = 'button';
       again.addEventListener('click', function () { retry(item.id); });
@@ -883,9 +885,11 @@
     .then(function (me) {
       isAdmin = me.role === 'admin';
       document.getElementById('who').textContent = 'Ви увійшли як ' + me.username;
-      uploadBtn.hidden = !isAdmin;
-      disk.hidden = !isAdmin;
+      canManage = me.role !== 'device';
+      uploadBtn.hidden = !canManage;
+      disk.hidden = !canManage;
       document.getElementById('users-link').hidden = !isAdmin;
+      document.getElementById('settings-link').hidden = !canManage;
       connect();
       return refresh();
     })
