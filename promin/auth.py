@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from starlette.requests import HTTPConnection
 
 from .accounts import BUILTIN_ADMIN, SESSION_IDLE_TTL, SessionStore, UserStore
+from . import crypto
 from .crypto import hash_password, hash_secret, same
 from .devices import DEVICE_IDLE_TTL, DeviceStore
 
@@ -128,8 +129,24 @@ class Auth:
         user = self.users.get(username)
         # Hash for an unknown name too, so the response does not reveal whether it exists.
         salt = bytes.fromhex(user["salt"]) if user else b"\0" * 16
-        digest = await asyncio.to_thread(hash_password, password, salt)
-        return user is not None and same(digest, user["hash"])
+        rounds = self.users.rounds(user) if user else crypto.PBKDF2_ROUNDS
+        digest = await asyncio.to_thread(hash_password, password, salt, rounds)
+        if user is None or not same(digest, user["hash"]):
+            return False
+        if rounds < crypto.PBKDF2_ROUNDS:
+            await asyncio.to_thread(self._strengthen, username, password, user["hash"])
+        return True
+
+    def _strengthen(self, username: str, password: str, old_hash: str) -> None:
+        """Stores a password that was just checked under today's number of rounds. Only a
+        login can do this: the password itself is never kept. Sessions that are open on
+        other phones stay open."""
+        before = self.fingerprint(username)
+        if not self.users.set_password(username, password, only_if_hash=old_hash):
+            return
+        after = self.fingerprint(username)
+        if before and after:
+            self.sessions.refingerprint(username, before, after)
 
     def login(self, username: str) -> str:
         """Starts a session for a user whose password was checked; returns the cookie value."""

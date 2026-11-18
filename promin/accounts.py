@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from . import crypto
 from .crypto import hash_password, hash_secret
 from .jsonfile import read_json, records, write_json
 
@@ -48,25 +49,36 @@ class UserStore:
             user = self._users.get(username)
             return dict(user) if user else None
 
-    def add(self, username: str, password: str, role: str) -> bool:
+    @staticmethod
+    def rounds(user: Dict[str, Any]) -> int:
+        """How many PBKDF2 rounds the hash of this user took; one stored before this was
+        recorded took the old number."""
+        return int(user.get("rounds") or crypto.LEGACY_PBKDF2_ROUNDS)
+
+    @staticmethod
+    def _hashed(password: str) -> Dict[str, Any]:
         salt = secrets.token_bytes(16)
-        digest = hash_password(password, salt)
+        rounds = crypto.PBKDF2_ROUNDS
+        return {"salt": salt.hex(), "hash": hash_password(password, salt, rounds), "rounds": rounds}
+
+    def add(self, username: str, password: str, role: str) -> bool:
+        hashed = self._hashed(password)
         with self._lock:
             if username in self._users:
                 return False
-            self._users[username] = {
-                "role": role, "salt": salt.hex(), "hash": digest, "created": time.time(),
-            }
+            self._users[username] = dict(hashed, role=role, created=time.time())
             self._save()
             return True
 
-    def set_password(self, username: str, password: str) -> bool:
-        salt = secrets.token_bytes(16)
-        digest = hash_password(password, salt)
+    def set_password(self, username: str, password: str, only_if_hash: Optional[str] = None) -> bool:
+        """Stores a new hash of the password. With `only_if_hash`, only while the user still
+        has that hash: a password changed in the meantime is left alone."""
+        hashed = self._hashed(password)
         with self._lock:
-            if username not in self._users:
+            user = self._users.get(username)
+            if user is None or (only_if_hash is not None and user["hash"] != only_if_hash):
                 return False
-            self._users[username].update(salt=salt.hex(), hash=digest)
+            user.update(hashed)
             self._save()
             return True
 
@@ -122,6 +134,19 @@ class SessionStore:
         with self._lock:
             if session_id in self._sessions:
                 self._sessions[session_id]["seen"] = time.time()
+                self._save()
+
+    def refingerprint(self, username: str, old: str, new: str) -> None:
+        """Moves the sessions of a user from one fingerprint to another, so that storing
+        the same password under a stronger hash does not log anyone out."""
+        with self._lock:
+            mine = [
+                s for s in self._sessions.values()
+                if s["username"] == username and s["fingerprint"] == old
+            ]
+            for session in mine:
+                session["fingerprint"] = new
+            if mine:
                 self._save()
 
     def remove(self, session_id: str) -> bool:

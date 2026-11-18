@@ -141,3 +141,35 @@ def test_users_survive_restart(tmp_path):
     with make_client(tmp_path, login=False) as c:
         c.follow_redirects = False
         assert sign_in(c, "olena", VIEWER_PASSWORD).status_code == 303
+
+
+def test_old_password_hash_is_strengthened_at_login(client, viewer):
+    """A password stored with the old number of rounds still logs in, is stored again with
+    today's number, and the phone that was already logged in stays logged in."""
+    from promin import crypto
+
+    users = client.app.state.services.users
+    old = users.get("olena")
+    salt = bytes.fromhex(old["salt"])
+    legacy_hash = crypto.hash_password(VIEWER_PASSWORD, salt, crypto.LEGACY_PBKDF2_ROUNDS)
+    # As a record written before the rounds were stored: no "rounds" at all.
+    users._users["olena"] = {
+        "role": "viewer", "salt": old["salt"], "hash": legacy_hash, "created": old["created"],
+    }
+    assert users.rounds(users.get("olena")) == crypto.LEGACY_PBKDF2_ROUNDS
+    # The session of `viewer` was made for the newer hash; make one for the legacy record.
+    other = TestClient(client.app, follow_redirects=False)
+    assert sign_in(other, "olena", "wrong-password").status_code == 401
+    assert users.get("olena")["hash"] == legacy_hash  # a wrong password changes nothing
+
+    services = client.app.state.services
+    before = services.auth.fingerprint("olena")
+    services.sessions.refingerprint("olena", services.sessions.get(
+        viewer.cookies["promin_session"].split(".")[0])["fingerprint"], before)
+    assert viewer.get("/api/me").status_code == 200
+
+    assert sign_in(other, "olena", VIEWER_PASSWORD).status_code == 303
+    stored = users.get("olena")
+    assert stored["rounds"] == crypto.PBKDF2_ROUNDS and stored["hash"] != legacy_hash
+    assert viewer.get("/api/me").status_code == 200  # still logged in elsewhere
+    assert sign_in(TestClient(client.app, follow_redirects=False), "olena", VIEWER_PASSWORD).status_code == 303
