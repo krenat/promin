@@ -10,7 +10,7 @@ import { closePlayer, player } from './player.js';
 import { connect } from './remote.js';
 import { setSelecting } from './selection.js';
 import { state } from './state.js';
-import { uploadBtn } from './upload.js';
+import { uploadBtn, uploadQuick } from './upload.js';
 
 // ------------------------------------------------- pairing a projector
 
@@ -73,7 +73,7 @@ api('GET', '/api/me')
     document.getElementById('who').textContent = 'Ви увійшли як ' + me.username;
     state.canManage = me.role !== 'device';
     document.getElementById('select-bar').hidden = !state.isAdmin;
-    uploadBtn.hidden = !state.canManage;
+    uploadBtn.hidden = uploadQuick.hidden = !state.canManage;
     disk.hidden = !state.canManage;
     document.getElementById('users-link').hidden = !state.isAdmin;
     document.getElementById('settings-link').hidden = !state.canManage;
