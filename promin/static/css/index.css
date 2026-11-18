@@ -53,7 +53,10 @@ button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); 
 .outline:hover:not(:disabled) { border-color: var(--muted); }
 
 #upload-btn { width: 100%; }
-#progress { margin-bottom: 16px; }
+/* The upload button is within reach wherever the list is scrolled to, so what it reports
+   (and every other message) stays in view too. */
+#notices { position: sticky; top: 0; z-index: 4; background: var(--bg); }
+#progress { padding: 8px 0 16px; }
 #progress[hidden] { display: none; }
 .progress-row {
   display: flex;
@@ -66,7 +69,7 @@ button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); 
 .progress-row span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
 .bar { height: 100%; width: 0; background: var(--accent); transition: width 150ms; }
-#message { margin: 0 0 16px; color: var(--danger); font-size: 14px; }
+#message { margin: 0; padding: 8px 0 16px; color: var(--danger); font-size: 14px; }
 #message:empty { display: none; }
 #disk { margin: 12px 0 0; color: var(--muted); font-size: 14px; }
 
@@ -349,6 +352,7 @@ body.selecting .thumb .play { display: none; }
 /* ---------- side menu ---------- */
 /* Uploading, the links and the account. Always there on a wide screen; on a phone it
    slides in from the left when the menu button is pressed. */
+#side:focus { outline: none; }
 #side {
   position: fixed; left: 0; top: 0; bottom: 0; z-index: 8;
   width: 264px; max-width: 86vw;
@@ -386,27 +390,29 @@ body.selecting .thumb .play { display: none; }
   display: grid; place-items: center; border-radius: 50%;
 }
 #upload-quick svg { width: 22px; height: 22px; fill: currentColor; }
-@media (max-width: 899px) {
-  #upload-quick { order: 1; }
-  .projector { min-width: 0; }
-  #tv-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .projector .dot { flex: none; }
-}
 @media (max-width: 419px) {
   header img { display: none; }
   .projector { font-size: 13px; gap: 6px; }
 }
 @media (max-width: 899px) {
+  #upload-quick { order: 1; }
+  /* A long status ("press Start on the projector") takes a second line, not an ellipsis. */
+  .projector { min-width: 0; text-align: left; line-height: 1.25; }
+  .projector .dot { flex: none; }
   #side { transform: translateX(-100%); visibility: hidden; transition: transform 200ms, visibility 200ms; }
-  body.side-open #side { transform: none; visibility: visible; }
+  /* Visible at once when opening, so that it can take the focus. */
+  body.side-open #side { transform: none; visibility: visible; transition: transform 200ms; }
   body.side-open #side-backdrop { opacity: 1; visibility: visible; }
   body.side-open { overflow: hidden; }
 }
 @media (min-width: 900px) {
   main { margin-left: 264px; padding-left: 24px; padding-right: 24px; }
   #dock { left: 264px; }
-  #menu-btn, #upload-quick, header img, header h1 { display: none; }
+  #menu-btn, #upload-quick, header img { display: none; }
+  /* The name is shown in the menu; the heading stays for those who do not see the page. */
+  header h1 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   header { justify-content: flex-end; }
+  body.selecting #select-bar { margin: -8px -24px 16px; padding: 8px 24px; }
 }
 @media (prefers-reduced-motion: reduce) {
   #side, #side-backdrop { transition: none; }

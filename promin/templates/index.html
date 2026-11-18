@@ -13,7 +13,7 @@
 <link rel="stylesheet" href="/static/{{v}}/css/index.css">
 </head>
 <body>
-<aside id="side" aria-label="Меню">
+<aside id="side" aria-label="Меню" tabindex="-1">
   <div class="brand"><img src="/static/logo.svg" alt=""><span>Promin</span></div>
   <button id="upload-btn" class="primary" type="button" hidden>Завантажити відео</button>
   <p id="disk" hidden></p>
@@ -53,11 +53,13 @@
   </section>
 
   <input id="file" type="file" accept="video/*" hidden>
-  <div id="progress" hidden>
-    <div class="progress-row"><span id="progress-name"></span><span id="progress-pct">0%</span></div>
-    <div class="track"><div class="bar" id="progress-bar"></div></div>
+  <div id="notices">
+    <div id="progress" hidden>
+      <div class="progress-row"><span id="progress-name"></span><span id="progress-pct">0%</span></div>
+      <div class="track"><div class="bar" id="progress-bar"></div></div>
+    </div>
+    <p id="message" role="alert"></p>
   </div>
-  <p id="message" role="alert"></p>
   <section id="queue" hidden aria-label="Черга перегляду">
     <div class="queue-head">
       <h2 id="queue-title">Черга</h2>

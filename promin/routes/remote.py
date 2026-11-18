@@ -108,7 +108,10 @@ async def dismiss_tv(svc: Services) -> None:
         tvtest.fail("Проектор від'єднали під час перевірки")
     with suppress(Exception):
         await tv.close(code=WS_DISMISSED)
-    await hub.broadcast({"type": "tv", "connected": False})
+    # Another screen may have become the projector while this one was closing, and the
+    # remotes have already heard of it: then there is nothing to take back.
+    if hub.tv is None:
+        await hub.broadcast({"type": "tv", "connected": False})
 
 
 # -------------------------------------------------------------------- a remote
