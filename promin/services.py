@@ -9,11 +9,13 @@ from typing import Any, Dict, List
 from .accounts import SessionStore, UserStore
 from .auth import Auth, LoginLimiter
 from .config import Settings
+from .db import DB_NAME, Database
 from .devices import PAIR_CODE_TTL, PAIR_STARTS_PER_WINDOW, DeviceStore, Pairing
 from .encoding import Encoding, EncodingStore
-from .library import PUBLIC_KEYS, FolderStore, QueueStore, VideoStore, remove_files
+from .library import PUBLIC_KEYS, FolderStore, QueueStore, Video, VideoStore, remove_files
 from .playback import Playback
 from .hub import WS_UNAUTHORIZED, Hub
+from .legacy import import_json
 from .transcode import Transcoder
 from .tvtest import TvTest
 
@@ -23,6 +25,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class Services:
     settings: Settings
+    db: Database
     videos: VideoStore
     folders: FolderStore
     queue: QueueStore
@@ -41,9 +44,9 @@ class Services:
 
     @classmethod
     def create(cls, settings: Settings) -> "Services":
-        data = settings.data_dir
-        videos = VideoStore(data / "videos.json")
-        queue = QueueStore(data / "queue.json")
+        db = Database(settings.data_dir / DB_NAME)
+        videos = VideoStore(db)
+        queue = QueueStore(db)
         hub = Hub()
         # A wrong value in the environment must not stop the service either.
         defaults = Encoding(
@@ -54,14 +57,15 @@ class Services:
                 "Ignoring PROMIN_MAX_BITRATE_KBPS and PROMIN_X264_PRESET: %s", defaults.problem()
             )
             defaults = Encoding()
-        encoding = EncodingStore(data / "encoding.json", defaults)
-        users = UserStore(data / "users.json")
-        sessions = SessionStore(data / "sessions.json")
-        devices = DeviceStore(data / "devices.json")
+        encoding = EncodingStore(db, defaults)
+        users = UserStore(db)
+        sessions = SessionStore(db)
+        devices = DeviceStore(db)
         return cls(
             settings=settings,
+            db=db,
             videos=videos,
-            folders=FolderStore(data / "folders.json"),
+            folders=FolderStore(db),
             queue=queue,
             encoding=encoding,
             transcoder=Transcoder(settings, videos, encoding),
@@ -74,38 +78,53 @@ class Services:
             pair_start_limiter=LoginLimiter(PAIR_STARTS_PER_WINDOW, PAIR_CODE_TTL),
             hub=hub,
             playback=Playback(hub, queue, videos),
-            tvtest=TvTest(data / "tvtest.json"),
+            tvtest=TvTest(db),
         )
 
     def load(self) -> None:
-        """Reads every data file; called once, as the app starts."""
-        for part in (
-            self.videos, self.encoding, self.users, self.sessions, self.devices, self.queue,
-            self.folders, self.tvtest,
-        ):
+        """Opens the data; called once, as the app starts."""
+        if self.db.open():
+            import_json(self.settings.data_dir, self.db)
+        for part in (self.encoding, self.devices, self.tvtest):
             part.load()
+
+    def close(self) -> None:
+        self.db.close()
 
     # ------------------------------------------------------------------ videos
 
-    def video_view(self, item: Dict[str, Any]) -> Dict[str, Any]:
+    def video_view(self, item: Video) -> Dict[str, Any]:
         """A video as the pages see it."""
-        data = {key: item.get(key) for key in PUBLIC_KEYS}
-        # A folder that is gone (deleted, or its file damaged) reads as no folder.
+        data: Dict[str, Any] = {key: item.get(key) for key in PUBLIC_KEYS}
+        # A folder that is gone reads as no folder.
         if not self.folders.exists(data["folder"]):
             data["folder"] = None
         if item["status"] == "processing":
             data["progress"] = self.transcoder.progress.get(item["id"], 0.0)
         return data
 
-    def delete_videos(self, video_ids: List[str]) -> List[str]:
-        """Deletes videos and returns the ids that existed. The list is written once, however
-        many videos go: every write waits for the disk and holds up everything else."""
+    async def delete_videos(self, video_ids: List[str]) -> List[str]:
+        """Deletes videos and returns the ids that existed. They leave the list and the
+        watch queue together: there is no moment when the queue names a video that is gone."""
+        with self.db.transaction():
+            deleted = self.videos.remove_many(video_ids)
+            queue_changed = self.queue.remove_videos(set(deleted))
         # Files are touched only for ids the list knew, so an id never reaches the glob raw.
-        deleted = self.videos.remove_many(video_ids)
         for video_id in deleted:
             self.transcoder.cancel(video_id)
             remove_files(self.settings, video_id)
+        if queue_changed:
+            await self.playback.queue_changed()
         return deleted
+
+    def delete_folder(self, folder_id: str) -> bool:
+        """Deletes a folder; its videos stay in the library without one. False if there is
+        no such folder."""
+        with self.db.transaction():
+            if not self.folders.remove(folder_id):
+                return False
+            self.videos.clear_folder(folder_id)
+            return True
 
     # ------------------------------------------------------------- connections
 

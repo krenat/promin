@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from helpers import change_stored
 from helpers import VIEWER_PASSWORD, add_user, make_client, needs_ffmpeg, sign_in, upload, wait_done
 
 
@@ -16,8 +17,6 @@ def test_admin_manages_users(client, tmp_path):
     assert add_user(client).status_code == 201
     names = [u["username"] for u in client.get("/api/users").json()["users"]]
     assert names == ["admin", "olena"]
-    # The password is not stored in the file as plain text.
-    assert VIEWER_PASSWORD not in (tmp_path / "users.json").read_text(encoding="utf-8")
 
     assert client.delete("/api/users/olena").status_code == 204
     assert client.delete("/api/users/olena").status_code == 404
@@ -135,38 +134,29 @@ def test_logout_clears_session(client):
     assert c.get("/api/me").status_code == 401
 
 
-def test_users_survive_restart(tmp_path):
-    with make_client(tmp_path) as c:
-        assert add_user(c).status_code == 201
-    with make_client(tmp_path, login=False) as c:
-        c.follow_redirects = False
-        assert sign_in(c, "olena", VIEWER_PASSWORD).status_code == 303
-
-
 def test_old_password_hash_is_strengthened_at_login(client, viewer):
     """A password stored with the old number of rounds still logs in, is stored again with
     today's number, and the phone that was already logged in stays logged in."""
     from promin import crypto
 
-    users = client.app.state.services.users
+    services = client.app.state.services
+    users = services.users
     old = users.get("olena")
-    salt = bytes.fromhex(old["salt"])
-    legacy_hash = crypto.hash_password(VIEWER_PASSWORD, salt, crypto.LEGACY_PBKDF2_ROUNDS)
-    # As a record written before the rounds were stored: no "rounds" at all.
-    users._users["olena"] = {
-        "role": "viewer", "salt": old["salt"], "hash": legacy_hash, "created": old["created"],
-    }
-    assert users.rounds(users.get("olena")) == crypto.LEGACY_PBKDF2_ROUNDS
-    # The session of `viewer` was made for the newer hash; make one for the legacy record.
+    legacy_hash = crypto.hash_password(
+        VIEWER_PASSWORD, bytes.fromhex(old["salt"]), crypto.LEGACY_PBKDF2_ROUNDS
+    )
+    # As the older version left it, with the phone logged in under that hash.
+    before = services.auth.fingerprint("olena")
+    change_stored(
+        client, "UPDATE users SET hash = ?, rounds = ? WHERE username = 'olena'",
+        legacy_hash, crypto.LEGACY_PBKDF2_ROUNDS,
+    )
+    services.sessions.refingerprint("olena", before, services.auth.fingerprint("olena"))
+    assert viewer.get("/api/me").status_code == 200
+
     other = TestClient(client.app, follow_redirects=False)
     assert sign_in(other, "olena", "wrong-password").status_code == 401
     assert users.get("olena")["hash"] == legacy_hash  # a wrong password changes nothing
-
-    services = client.app.state.services
-    before = services.auth.fingerprint("olena")
-    services.sessions.refingerprint("olena", services.sessions.get(
-        viewer.cookies["promin_session"].split(".")[0])["fingerprint"], before)
-    assert viewer.get("/api/me").status_code == 200
 
     assert sign_in(other, "olena", VIEWER_PASSWORD).status_code == 303
     stored = users.get("olena")

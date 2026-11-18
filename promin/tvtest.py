@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import secrets
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import MB
 from .encoding import FPS_CHOICES, HEIGHTS, SUGGESTED_KBPS
-from .jsonfile import read_json, sibling, write_json
+from .db import Database, sibling
 from .parsing import finite
 from .ffmpeg import ProcessingError, reap
 
@@ -159,7 +161,8 @@ def tvtest_fits(result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def tvtest_record(data: Any) -> Dict[str, Any]:
-    """A check for read_json: a finished projector check as TvTest.finish saved it."""
+    """A finished projector check as TvTest.finish saved it; KeyError or TypeError if the
+    stored one is not that."""
     parts = [(data, ("clips", "device", "fits", "finished", "speed_kbps"))]
     parts += [(clip, ("id", "height", "fps", "status")) for clip in data["clips"]]
     parts += [(data["device"], ("agent",)), (data["fits"], ("max_height", "max_fps"))]
@@ -171,10 +174,12 @@ def tvtest_record(data: Any) -> Dict[str, Any]:
 
 
 class TvTest:
-    """The projector check: where a running one is, and the last finished one on disk."""
+    """The projector check: where a running one is, and the last finished one, stored."""
 
-    def __init__(self, path: Path) -> None:
-        self.path = path
+    KEY = "tvtest"
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
         self.levels = tvtest_levels()
         self.result: Optional[Dict[str, Any]] = None
         self.status = "idle"  # idle → preparing (clips are generated) → running → idle
@@ -185,7 +190,11 @@ class TvTest:
         self.task: Optional[asyncio.Task] = None
 
     def load(self) -> None:
-        self.result = read_json(self.path, tvtest_record)
+        self.result = None
+        row = self.db.one("SELECT value FROM settings WHERE key = ?", (self.KEY,))
+        if row is not None:
+            with suppress(ValueError, TypeError, KeyError, AttributeError):  # shown as no check yet
+                self.result = tvtest_record(json.loads(row["value"]))
 
     def begin(self) -> str:
         self.status, self.run, self.step, self.error = "preparing", secrets.token_hex(8), 0, None
@@ -198,7 +207,10 @@ class TvTest:
         result = clean_tvtest_report(message, self.levels)
         result["fits"] = tvtest_fits(result)
         result["finished"] = time.time()
-        write_json(self.path, result)
+        self.db.run(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            (self.KEY, json.dumps(result, ensure_ascii=False)),
+        )
         self.result = result
         self.status, self.run, self.error = "idle", None, None
 

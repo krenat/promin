@@ -51,9 +51,8 @@ async def rename_folder(folder_id: str, body: FolderName, svc: Svc) -> Dict[str,
 @router.delete("/api/folders/{folder_id}", status_code=204, dependencies=MEMBER)
 async def delete_folder(folder_id: str, svc: Svc) -> Response:
     """Deletes a folder; its videos stay in the library without a folder."""
-    if not svc.folders.remove(folder_id):
+    if not svc.delete_folder(folder_id):
         raise HTTPException(404, "Теку не знайдено")
-    svc.videos.clear_folder(folder_id)
     return Response(status_code=204)
 
 

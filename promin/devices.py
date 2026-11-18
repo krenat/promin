@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import secrets
-import threading
+import sqlite3
 import time
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict
 
 from .accounts import SESSION_IDLE_TTL
 from .crypto import hash_secret, same
-from .jsonfile import read_json, records, write_json
+from .db import Database
 
 # A paired projector is forgotten after as long without use as a user session.
 DEVICE_IDLE_TTL = SESSION_IDLE_TTL
@@ -20,6 +19,23 @@ PAIR_MAX_PENDING = 500
 PAIR_STARTS_PER_WINDOW = 10
 
 
+class Device(TypedDict):
+    id: str
+    name: str
+    hash: str
+    approved_by: str
+    created: float
+    seen: float  # when it was last in touch
+
+
+class DeviceSummary(TypedDict):
+    id: str
+    name: str
+    approved_by: str
+    created: float
+    seen: float
+
+
 class DeviceStore:
     """Paired projectors. Only a hash of the device cookie secret is stored.
 
@@ -27,82 +43,57 @@ class DeviceStore:
     lost (cleared browser, a new pairing) or it is no longer used.
     """
 
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._lock = threading.Lock()
-        self._devices: Dict[str, Dict[str, Any]] = {}
+    def __init__(self, db: Database) -> None:
+        self.db = db
 
     def load(self) -> None:
-        with self._lock:
-            check = records("name", "hash", "approved_by", "created")
-            self._devices = read_json(self.path, check) or {}
-            if self._purge():
-                self._save()
+        self._purge()
 
-    def _save(self) -> None:
-        write_json(self.path, self._devices, private=True)
-
-    @staticmethod
-    def seen(device: Dict[str, Any]) -> float:
-        """When the device was last in touch; one paired before this was recorded counts
-        from its pairing."""
-        return device.get("seen") or device["created"]
-
-    def _purge(self) -> bool:
-        cutoff = time.time() - DEVICE_IDLE_TTL
-        stale = [key for key, d in self._devices.items() if self.seen(d) < cutoff]
-        for key in stale:
-            del self._devices[key]
-        return bool(stale)
+    def _purge(self) -> None:
+        self.db.run("DELETE FROM devices WHERE seen < ?", (time.time() - DEVICE_IDLE_TTL,))
 
     def add(self, name: str, approved_by: str) -> str:
         """Creates a device and returns its cookie value."""
         device_id = secrets.token_hex(8)
         secret = secrets.token_urlsafe(32)
         now = time.time()
-        with self._lock:
+        with self.db.transaction() as conn:
             self._purge()
-            self._devices[device_id] = {
-                "name": name,
-                "hash": hash_secret(secret),
-                "approved_by": approved_by,
-                "created": now,
-                "seen": now,
-            }
-            self._save()
+            conn.execute(
+                "INSERT INTO devices (id, name, hash, approved_by, created, seen)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (device_id, name, hash_secret(secret), approved_by, now, now),
+            )
         return "@%s.%s" % (device_id, secret)
 
     def touch(self, device_id: str) -> None:
-        with self._lock:
-            if device_id in self._devices:
-                self._devices[device_id]["seen"] = time.time()
-                self._save()
+        self.db.run("UPDATE devices SET seen = ? WHERE id = ?", (time.time(), device_id))
 
-    def get(self, device_id: str) -> Optional[Dict[str, Any]]:
-        with self._lock:
-            device = self._devices.get(device_id)
-            return dict(device) if device else None
+    @staticmethod
+    def _device(row: sqlite3.Row) -> Device:
+        return Device(
+            id=row["id"], name=row["name"], hash=row["hash"], approved_by=row["approved_by"],
+            created=row["created"], seen=row["seen"],
+        )
 
-    def list(self) -> List[Dict[str, Any]]:
-        with self._lock:
-            if self._purge():
-                self._save()
-            items = [
-                {
-                    "id": key, "name": d["name"], "approved_by": d["approved_by"],
-                    "created": d["created"], "seen": self.seen(d),
-                }
-                for key, d in self._devices.items()
-            ]
-        return sorted(items, key=lambda item: item["created"])
+    def get(self, device_id: str) -> Optional[Device]:
+        row = self.db.one("SELECT * FROM devices WHERE id = ?", (device_id,))
+        return self._device(row) if row else None
+
+    def list(self) -> List[DeviceSummary]:
+        with self.db.transaction() as conn:
+            self._purge()
+            rows = conn.execute("SELECT * FROM devices ORDER BY created").fetchall()
+        return [
+            DeviceSummary(
+                id=row["id"], name=row["name"], approved_by=row["approved_by"],
+                created=row["created"], seen=row["seen"],
+            )
+            for row in rows
+        ]
 
     def remove(self, device_id: str) -> bool:
-        with self._lock:
-            if device_id not in self._devices:
-                return False
-            del self._devices[device_id]
-            self._save()
-            return True
+        return self.db.run("DELETE FROM devices WHERE id = ?", (device_id,)) > 0
 
 
 class Pairing:

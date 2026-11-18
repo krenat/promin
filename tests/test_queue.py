@@ -5,6 +5,7 @@ import json
 
 from fastapi.testclient import TestClient
 
+from helpers import change_stored, stored
 from helpers import add_fake_video, make_client, pair_key, pair_status, start_pairing, tv_state
 
 
@@ -63,8 +64,7 @@ def test_deleted_videos_leave_the_queue(client, tmp_path):
     assert queue_names(client) == ["bbb", "ccc"]
     client.post("/api/videos/delete", json={"ids": ["ccc"]})
     assert queue_names(client) == ["bbb"]
-    stored = json.loads((tmp_path / "queue.json").read_text(encoding="utf-8"))
-    assert [e["video_id"] for e in stored] == ["bbb"]
+    assert [row["video_id"] for row in stored(client, "SELECT video_id FROM queue")] == ["bbb"]
 
 
 def test_queue_survives_restart(tmp_path):
@@ -73,12 +73,6 @@ def test_queue_survives_restart(tmp_path):
         c.post("/api/queue", json={"video_id": "aaa"})
     with make_client(tmp_path) as c:
         assert queue_names(c) == ["aaa"]
-
-
-def test_damaged_queue_file_is_ignored(tmp_path):
-    (tmp_path / "queue.json").write_text('[{"oops": 1}]', encoding="utf-8")
-    with make_client(tmp_path) as c:
-        assert c.get("/api/queue").json() == {"queue": []}
 
 
 def test_viewer_manages_the_queue_but_a_projector_does_not(client, viewer, projector, tmp_path):
@@ -148,10 +142,12 @@ def test_a_stale_end_report_does_not_skip_a_video(client, tmp_path):
 
 
 def test_next_skips_videos_deleted_from_the_queue_file(client, tmp_path):
+    add_fake_video(client, tmp_path, "gone")
     add_fake_video(client, tmp_path, "bbb")
+    client.post("/api/queue", json={"video_id": "gone"})
     client.post("/api/queue", json={"video_id": "bbb"})
-    # A queue entry whose video vanished behind the server's back.
-    client.app.state.services.queue._entries.insert(0, {"entry": "x1", "video_id": "gone"})
+    # A video that vanished behind the server's back: its queue entry is still there.
+    change_stored(client, "DELETE FROM videos WHERE id = 'gone'")
     with client.websocket_connect("/ws?role=tv") as tv, client.websocket_connect("/ws?role=remote") as remote:
         remote.receive_json()
         remote.receive_json()

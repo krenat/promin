@@ -110,9 +110,8 @@ async def thumb(video_id: str, svc: Svc) -> FileResponse:
 
 @router.delete("/api/videos/{video_id}", status_code=204, dependencies=MEMBER)
 async def delete_video(video_id: str, svc: Svc) -> Response:
-    if not svc.delete_videos([video_id]):
+    if not await svc.delete_videos([video_id]):
         raise HTTPException(404, "Відео не знайдено")
-    await svc.playback.forget_videos({video_id})
     return Response(status_code=204)
 
 
@@ -124,7 +123,6 @@ async def delete_videos(body: VideoIds, svc: Svc) -> Dict[str, Any]:
         raise HTTPException(400, "Не вибрано жодного відео")
     if len(ids) > BATCH_DELETE_MAX:
         raise HTTPException(400, "За раз можна видалити щонайбільше %d відео" % BATCH_DELETE_MAX)
-    deleted = svc.delete_videos(ids)
+    deleted = await svc.delete_videos(ids)
     gone = set(deleted)
-    await svc.playback.forget_videos(gone)
     return {"deleted": deleted, "missing": [i for i in ids if i not in gone]}

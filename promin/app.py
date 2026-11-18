@@ -40,6 +40,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             with suppress(asyncio.CancelledError):
                 await svc.tvtest.task
         await svc.transcoder.stop()
+        svc.close()
 
     app = FastAPI(title="Promin", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.services = svc

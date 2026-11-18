@@ -129,6 +129,25 @@ def add_fake_video(client: TestClient, tmp_path: Path, video_id: str, status: st
     (tmp_path / "thumbs" / (video_id + ".jpg")).write_bytes(b"t")
 
 
+def stored(client: TestClient, sql: str, *params):
+    """Rows straight from the data file, past the stores."""
+    return client.app.state.services.db.all(sql, params)
+
+
+def change_stored(client: TestClient, sql: str, *params) -> None:
+    """Changes the data file behind the server's back."""
+    client.app.state.services.db.run(sql, params)
+
+
+def count_commits(client: TestClient) -> list:
+    """Counts the transactions stored from now on: the list it returns grows by one each."""
+    commits: list = []
+    client.app.state.services.db.conn.set_trace_callback(
+        lambda statement: commits.append(statement) if statement == "COMMIT" else None
+    )
+    return commits
+
+
 def video_ids(client: TestClient) -> set:
     return {v["id"] for v in client.get("/api/videos").json()["videos"]}
 

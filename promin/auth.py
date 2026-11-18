@@ -100,7 +100,7 @@ class Auth:
             digest = hash_secret(secret)
             if device is None or not same(digest, device["hash"]):
                 return None
-            idle = time.time() - self.devices.seen(device)
+            idle = time.time() - device["seen"]
             if idle > DEVICE_IDLE_TTL:
                 self.devices.remove(device_id)
                 return None
@@ -129,7 +129,7 @@ class Auth:
         user = self.users.get(username)
         # Hash for an unknown name too, so the response does not reveal whether it exists.
         salt = bytes.fromhex(user["salt"]) if user else b"\0" * 16
-        rounds = self.users.rounds(user) if user else crypto.PBKDF2_ROUNDS
+        rounds = user["rounds"] if user else crypto.PBKDF2_ROUNDS
         digest = await asyncio.to_thread(hash_password, password, salt, rounds)
         if user is None or not same(digest, user["hash"]):
             return False

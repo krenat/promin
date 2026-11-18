@@ -32,11 +32,6 @@ class Playback:
         await self.hub.broadcast({"type": "queue", "queue": view})
         return {"queue": view}
 
-    async def forget_videos(self, video_ids: set) -> None:
-        """Drops deleted videos from the queue and tells the remotes if it changed."""
-        if self.queue.remove_videos(video_ids):
-            await self.queue_changed()
-
     async def play_next(self) -> bool:
         """Loads the first playable queue entry on the projector; False if there is none."""
         hub = self.hub

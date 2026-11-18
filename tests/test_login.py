@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from promin.app import create_app
 from promin.config import Settings
 
+from helpers import change_stored
 from helpers import (
     TOKEN,
     VIEWER_PASSWORD,
@@ -137,9 +138,9 @@ def test_each_login_gets_its_own_session(anon, tmp_path):
     anon.cookies.clear()
     second = sign_in(anon).cookies["promin_session"]
     assert first != second
-    # The file holds only a hash of the secret.
-    stored = (tmp_path / "sessions.json").read_text(encoding="utf-8")
-    assert first.split(".", 1)[1] not in stored and TOKEN not in stored
+    # The data file holds only a hash of the secret.
+    data = b"".join(path.read_bytes() for path in tmp_path.glob("promin.db*"))
+    assert first.split(".", 1)[1].encode() not in data and TOKEN.encode() not in data
 
 
 def test_logout_revokes_the_session_on_the_server(anon):
@@ -163,11 +164,12 @@ def test_idle_session_expires(anon):
     sessions = anon.app.state.services.sessions
     session_id = cookie.split(".", 1)[0]
     # The session was used: the stamp is refreshed and it lives on.
-    sessions._sessions[session_id]["seen"] -= 29 * 24 * 3600
+    age = "UPDATE sessions SET seen = seen - ? WHERE id = ?"
+    change_stored(anon, age, 29 * 24 * 3600, session_id)
     assert anon.get("/api/me").status_code == 200
     assert time.time() - sessions.get(session_id)["seen"] < 60
     # Unused for more than 30 days: the session is gone.
-    sessions._sessions[session_id]["seen"] -= 31 * 24 * 3600
+    change_stored(anon, age, 31 * 24 * 3600, session_id)
     assert anon.get("/api/me").status_code == 401
     assert sessions.get(session_id) is None
 

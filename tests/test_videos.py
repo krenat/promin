@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from helpers import count_commits
 from helpers import (
     add_fake_video,
     make_client,
@@ -210,15 +211,14 @@ def test_only_admin_deletes_in_batches(client, viewer, anon, tmp_path):
     assert viewer.delete("/api/videos/aaa").status_code == 204
 
 
-def test_batch_delete_writes_the_list_once(client, tmp_path, monkeypatch):
-    from promin import library as library_module
-
+def test_batch_delete_is_stored_at_once(client, tmp_path):
+    """The videos leave the list and the watch queue together, in one transaction."""
     for i in range(20):
         add_fake_video(client, tmp_path, "v%02d" % i)
-    writes = []
-    real = library_module.write_json
-    monkeypatch.setattr(library_module, "write_json", lambda path, *a, **kw: (writes.append(path.name), real(path, *a, **kw)))
+        client.post("/api/queue", json={"video_id": "v%02d" % i})
+    commits = count_commits(client)
     r = client.post("/api/videos/delete", json={"ids": ["v%02d" % i for i in range(20)]})
     assert len(r.json()["deleted"]) == 20
-    assert writes.count("videos.json") == 1
+    assert len(commits) == 1
+    assert client.get("/api/queue").json() == {"queue": []}
     assert video_ids(client) == set()
