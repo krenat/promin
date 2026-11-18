@@ -35,8 +35,6 @@ THUMB_TIMEOUT_SECONDS = 2 * 60
 
 
 class Transcoder:
-    """A queue with a single worker: videos are processed one at a time."""
-
     def __init__(self, settings: Settings, videos: VideoStore, encoding: EncodingStore) -> None:
         self.settings = settings
         self.videos = videos

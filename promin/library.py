@@ -92,8 +92,6 @@ def _video(row: sqlite3.Row) -> Video:
 
 
 class VideoStore:
-    """The list of videos."""
-
     def __init__(self, db: Database) -> None:
         self.db = db
 

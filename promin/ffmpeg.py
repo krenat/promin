@@ -31,7 +31,6 @@ HDR_FILTER_SWSCALE = (
 class Plan(TypedDict):
     """How much work a video needs, as plan_encode decided."""
 
-    # remux: only repackage; audio: re-encode only the audio; transcode: everything.
     mode: Literal["remux", "audio", "transcode"]
     duration: float
     fps: float
@@ -108,7 +107,6 @@ def plan_encode(probe: Dict[str, Any], encoding: Encoding) -> Plan:
         and 0 < fps <= encoding.max_fps + 0.5
         and 0 < bitrate <= encoding.max_bitrate_kbps * 1000 * 1.25
     )
-    # Keep the audio as is if it is mono or stereo AAC.
     audio_ok = audio is None or (
         audio.get("codec_name") == "aac" and int(audio.get("channels") or 2) <= 2
     )
@@ -185,7 +183,6 @@ def build_ffmpeg_args(
     if plan["mode"] == "remux":
         args += ["-c", "copy"]
     elif plan["mode"] == "audio":
-        # The picture is copied losslessly; only the audio is re-encoded.
         args += ["-c:v", "copy", "-c:a", "aac", "-b:a", audio_rate, "-ac", "2"]
     else:
         tone_map = hdr_filter if plan["hdr"] else None

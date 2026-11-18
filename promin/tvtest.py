@@ -15,8 +15,6 @@ from .encoding import FPS_CHOICES, HEIGHTS, SUGGESTED_KBPS
 from .ffmpeg import ProcessingError, reap
 from .parsing import finite
 
-# The projector check: the projector plays a generated clip for every resolution and frame
-# rate offered on the settings page and reports how it went, and measures its download speed.
 TVTEST_VERSION = 1  # part of the clip file names: raise it when the clips change
 TVTEST_CLIP_SECONDS = 8
 TVTEST_MEASURE_SECONDS = 6  # how long playback of each clip is watched

@@ -121,7 +121,7 @@ class Database:
             try:
                 conn = self._connect()
             except Damaged:
-                # The copy stays as it is under its own name: it is not the file above.
+                # What was copied into place is dropped; the copy itself goes aside.
                 for suffix in ("", "-wal", "-shm"):
                     sibling(self.path, suffix).unlink(missing_ok=True)
                 self._set_aside(backup)

@@ -98,7 +98,6 @@ class Services:
         folders that exist, so they are read once and not once per video."""
         data: Dict[str, Any] = {key: item.get(key) for key in PUBLIC_KEYS}
         known = self.folders.exists(item["folder"]) if folders is None else item["folder"] in folders
-        # A folder that is gone reads as no folder.
         if not known:
             data["folder"] = None
         if item["status"] == "processing":

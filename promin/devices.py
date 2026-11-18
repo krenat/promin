@@ -25,7 +25,7 @@ class Device(TypedDict):
     hash: str
     approved_by: str
     created: float
-    seen: float  # when it was last in touch
+    seen: float
 
 
 class DeviceSummary(TypedDict):

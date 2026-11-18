@@ -8,7 +8,6 @@ from fastapi import WebSocket
 
 from .parsing import finite
 
-# Which commands the remote may send to the projector.
 REMOTE_ACTIONS = (
     "load", "play", "pause", "seek", "seek_by", "volume", "stop", "next", "disconnect",
 )
