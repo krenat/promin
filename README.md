@@ -55,7 +55,9 @@ Every route names who may call it (`AUTH`, `MEMBER` or `ADMIN` from `routes/deps
 
 Pages name their styles and scripts under a version (`/static/v-<version>/...`) that changes whenever a file in `static/` does, so a browser never runs an old script against a new page.
 
-The scripts are plain JavaScript without a build step. The phone page's script is split into ES modules in `static/js/index/` (`main.js` starts it; the shared state is in `state.js`). `api.js` is the one way every page calls the server. With Node.js installed, the tests also load every module script in it; without it those tests are skipped. `tv.js` stays one file without newer language features, because the projector's browser may be old.
+The scripts are plain JavaScript without a build step. The phone page's script is split into ES modules in `static/js/index/` (`main.js` starts it; the shared state is in `state.js`). `api.js` is the one way every page calls the server. `tv.js` stays one file without newer language features, because the projector's browser may be old; a test fails if one slips in.
+
+With Node.js installed, the tests also load every module script in it and run the projector page in a stand-in browser (`tests/tv_page.mjs`): time, the network and the `<video>` element are moved by hand, and `tests/tv_page.test.mjs` checks what the page does with the remote's commands, playback errors, a dropped connection, pairing and the projector check. Without Node.js those tests are skipped.
 
 The tests follow the same subjects: `tests/test_<subject>.py`, with the shared fixtures in `conftest.py` and the shared steps in `helpers.py`.
 

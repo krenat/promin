@@ -110,3 +110,28 @@ def test_plain_scripts_parse(script):
         ["node", "--check", str(STATIC_DIR / "js" / script)], capture_output=True, text=True, timeout=60
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs Node.js")
+def test_projector_page_behaves():
+    """What tv.js does (the remote, errors, reconnecting, pairing, the projector check),
+    checked in a stand-in browser: see tv_page.test.mjs."""
+    result = subprocess.run(
+        ["node", "--test", str(Path(__file__).with_name("tv_page.test.mjs"))],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert re.search(r"^. pass [1-9]", result.stdout, re.M), result.stdout
+
+
+def test_projector_script_uses_no_newer_language_features():
+    """tv.js has to run in the old browser of a projector, which stops at the first piece
+    of syntax it does not know."""
+    from promin.config import STATIC_DIR
+
+    source = (STATIC_DIR / "js" / "tv.js").read_text(encoding="utf-8")
+    code = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.S)
+    code = re.sub(r"'(?:\\.|[^'\\])*'", "''", code)  # what is inside a string is not syntax
+    for newer in (r"=>", r"`", r"\b(?:let|const|class|async|await)\s", r"\.\.\.", r"\?\.", r"\?\?"):
+        found = re.search(newer, code)
+        assert not found, "tv.js uses %r" % (found.group(0) if found else "")
