@@ -1,7 +1,6 @@
 """How new videos are encoded: the choices of the settings page and where they are kept."""
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass
 from typing import Optional
 
@@ -65,22 +64,17 @@ class EncodingStore:
         # Stored values that no longer fit must not stop the service: fall back to the
         # defaults.
         self._current = self.defaults
-        row = self.db.one("SELECT value FROM settings WHERE key = ?", (self.KEY,))
-        if row is None:
-            return
         try:
-            merged = Encoding(**{**asdict(self.defaults), **dict(json.loads(row["value"]))})
+            merged = Encoding(**{**asdict(self.defaults), **dict(self.db.get_setting(self.KEY))})
+            # A value of the wrong type fails here, when it is compared with the limits.
+            if not merged.problem():
+                self._current = merged
         except (ValueError, TypeError):
-            return
-        if not merged.problem():
-            self._current = merged
+            pass
 
     def get(self) -> Encoding:
         return self._current
 
     def set(self, encoding: Encoding) -> None:
-        self.db.run(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-            (self.KEY, json.dumps(asdict(encoding))),
-        )
+        self.db.set_setting(self.KEY, asdict(encoding))
         self._current = encoding

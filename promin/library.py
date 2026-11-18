@@ -57,6 +57,17 @@ class QueueEntry(TypedDict):
     video_id: str
 
 
+class QueuedVideo(TypedDict):
+    """A queue entry with what a phone needs to show it."""
+
+    entry: str
+    video_id: str
+    name: str
+    duration: Optional[float]
+    thumb: bool
+    thumb_v: Optional[int]
+
+
 VIDEO_COLUMNS = tuple(Video.__annotations__)
 # What the pages are told about a video: everything but where its original is.
 PUBLIC_KEYS = tuple(key for key in VIDEO_COLUMNS if key != "source")
@@ -222,6 +233,20 @@ class QueueStore:
     def list(self) -> List[QueueEntry]:
         with self.db.reading() as conn:
             return self._entries(conn)
+
+    def playable(self) -> List[QueuedVideo]:
+        """The queue as phones show it: its entries whose videos can be played, in order."""
+        return [
+            QueuedVideo(
+                entry=row["entry"], video_id=row["id"], name=row["name"],
+                duration=row["duration"], thumb=bool(row["thumb"]), thumb_v=row["thumb_v"],
+            )
+            for row in self.db.all(
+                "SELECT queue.entry, videos.id, videos.name, videos.duration, videos.thumb,"
+                " videos.thumb_v FROM queue JOIN videos ON videos.id = queue.video_id"
+                " WHERE videos.status = 'ready' ORDER BY queue.position"
+            )
+        ]
 
     def add(self, video_id: str) -> str:
         """Appends a video and returns the new entry id; raises ValueError with text for

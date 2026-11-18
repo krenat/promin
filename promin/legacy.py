@@ -13,6 +13,8 @@ from .db import Database, sibling
 
 log = logging.getLogger(__name__)
 
+# The setting that says the JSON files were dealt with.
+IMPORTED = "json_imported"
 BAD_SHAPE = (ValueError, TypeError, KeyError, AttributeError)
 
 
@@ -157,11 +159,14 @@ TABLES: Tuple[Tuple[str, Callable[[Any], Rows], str], ...] = (
 def import_json(data_dir: Path, db: Database) -> None:
     """Fills a new database from the JSON files in the data directory.
 
-    Called once, when the database has just been created. A file that cannot be used is
-    left out, as it was before: a service that starts without its folders is better than
-    one that does not start. What was read is stored together or not at all, and the files
-    are then renamed to `.imported`: a copy that is never read again.
+    Done once per database, which remembers it: a start that was cut short before this
+    finished does it again, and one after it never does. A file that cannot be used is left
+    out, as it was before: a service that starts without its folders is better than one
+    that does not start. What was read is stored together or not at all, and the files are
+    then renamed to `.imported`: a copy that is never read again.
     """
+    if db.get_setting(IMPORTED):
+        return
     read = [
         (name, read_file(data_dir / name, to_rows), target) for name, to_rows, target in TABLES
     ]
@@ -169,11 +174,14 @@ def import_json(data_dir: Path, db: Database) -> None:
         for _, rows, target in read:
             if rows:
                 conn.executemany("INSERT OR IGNORE INTO " + target, rows)
+        db.set_setting(IMPORTED, True)
     counts = []
     for name, rows, _ in read:
-        path = data_dir / name
-        if path.exists():
-            os.replace(path, sibling(path, ".imported"))
+        # The older copies go too: nothing may bring them back into a later database.
+        for suffix in ("", ".tmp", ".bak"):
+            path = sibling(data_dir / name, suffix)
+            if path.exists():
+                os.replace(path, sibling(path, ".imported"))
         if rows is not None:
             counts.append("%s (%d)" % (name, len(rows)))
     if counts:

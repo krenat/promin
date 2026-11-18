@@ -211,6 +211,18 @@ def test_only_admin_deletes_in_batches(client, viewer, anon, tmp_path):
     assert viewer.delete("/api/videos/aaa").status_code == 204
 
 
+def test_the_list_does_not_ask_about_every_video(client, tmp_path):
+    """The list and the queue are read with a few queries, however many videos there are."""
+    for i in range(30):
+        add_fake_video(client, tmp_path, "v%02d" % i)
+        client.post("/api/queue", json={"video_id": "v%02d" % i})
+    queries = []
+    client.app.state.services.db.conn.set_trace_callback(queries.append)
+    assert len(client.get("/api/videos").json()["videos"]) == 30
+    assert len(client.get("/api/queue").json()["queue"]) == 30
+    assert len([q for q in queries if q.startswith("SELECT")]) < 10
+
+
 def test_batch_delete_is_stored_at_once(client, tmp_path):
     """The videos leave the list and the watch queue together, in one transaction."""
     for i in range(20):

@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Set
 
 from .accounts import SessionStore, UserStore
 from .auth import Auth, LoginLimiter
@@ -83,8 +83,8 @@ class Services:
 
     def load(self) -> None:
         """Opens the data; called once, as the app starts."""
-        if self.db.open():
-            import_json(self.settings.data_dir, self.db)
+        self.db.open()
+        import_json(self.settings.data_dir, self.db)
         for part in (self.encoding, self.devices, self.tvtest):
             part.load()
 
@@ -93,11 +93,13 @@ class Services:
 
     # ------------------------------------------------------------------ videos
 
-    def video_view(self, item: Video) -> Dict[str, Any]:
-        """A video as the pages see it."""
+    def video_view(self, item: Video, folders: Optional[Set[str]] = None) -> Dict[str, Any]:
+        """A video as the pages see it. A caller with many videos passes the ids of the
+        folders that exist, so they are read once and not once per video."""
         data: Dict[str, Any] = {key: item.get(key) for key in PUBLIC_KEYS}
+        known = self.folders.exists(item["folder"]) if folders is None else item["folder"] in folders
         # A folder that is gone reads as no folder.
-        if not self.folders.exists(data["folder"]):
+        if not known:
             data["folder"] = None
         if item["status"] == "processing":
             data["progress"] = self.transcoder.progress.get(item["id"], 0.0)

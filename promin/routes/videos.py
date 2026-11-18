@@ -35,13 +35,15 @@ async def index() -> Response:
 @router.get("/api/videos", dependencies=AUTH)
 async def list_videos(svc: Svc) -> Dict[str, Any]:
     usage = shutil.disk_usage(svc.settings.data_dir)
-    videos = [svc.video_view(item) for item in svc.videos.list()]
+    folders = svc.folders.list()
+    known = {folder["id"] for folder in folders}
+    videos = [svc.video_view(item, known) for item in svc.videos.list()]
     counts: Dict[Optional[str], int] = {}
     for video in videos:
         counts[video["folder"]] = counts.get(video["folder"], 0) + 1
     return {
         "videos": videos,
-        "folders": [dict(f, count=counts.get(f["id"], 0)) for f in svc.folders.list()],
+        "folders": [dict(f, count=counts.get(f["id"], 0)) for f in folders],
         "disk": {"free": usage.free, "total": usage.total},
         "max_upload": svc.settings.max_upload_bytes,
     }

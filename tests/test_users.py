@@ -8,6 +8,7 @@ from helpers import (
     VIEWER_PASSWORD,
     add_user,
     change_stored,
+    count_commits,
     needs_ffmpeg,
     sign_in,
     upload,
@@ -165,7 +166,10 @@ def test_old_password_hash_is_strengthened_at_login(client, viewer):
     assert sign_in(other, "olena", "wrong-password").status_code == 401
     assert users.get("olena")["hash"] == legacy_hash  # a wrong password changes nothing
 
+    commits = count_commits(client)
     assert sign_in(other, "olena", VIEWER_PASSWORD).status_code == 303
+    # The new hash and the sessions that depend on it are stored together; then the login.
+    assert len(commits) == 2
     stored = users.get("olena")
     assert stored["rounds"] == crypto.PBKDF2_ROUNDS and stored["hash"] != legacy_hash
     assert viewer.get("/api/me").status_code == 200  # still logged in elsewhere

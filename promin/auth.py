@@ -148,6 +148,12 @@ class Auth:
         rounds = user["rounds"] if user else crypto.PBKDF2_ROUNDS
         digest = await asyncio.to_thread(hash_password, password, salt, rounds)
         if user is None or not same(digest, user["hash"]):
+            if rounds < crypto.PBKDF2_ROUNDS:
+                # A wrong password takes as long for an old hash as for today's and for
+                # an unknown name, so the time does not tell them apart.
+                await asyncio.to_thread(
+                    hash_password, password, salt, crypto.PBKDF2_ROUNDS - rounds
+                )
             return False
         if rounds < crypto.PBKDF2_ROUNDS:
             await asyncio.to_thread(self._strengthen, username, password, user["hash"])
@@ -157,12 +163,16 @@ class Auth:
         """Stores a password that was just checked under today's number of rounds. Only a
         login can do this: the password itself is never kept. Sessions that are open on
         other phones stay open."""
-        before = self.fingerprint(username)
-        if not self.users.set_password(username, password, only_if_hash=old_hash):
-            return
-        after = self.fingerprint(username)
-        if before and after:
-            self.sessions.refingerprint(username, before, after)
+        hashed = self.users.hashed(password)
+        # The hash and the sessions that depend on it change together: a request from
+        # another phone never finds its session made for a hash that is gone.
+        with self.users.db.transaction():
+            before = self.fingerprint(username)
+            if not self.users.set_hash(username, hashed, only_if_hash=old_hash):
+                return
+            after = self.fingerprint(username)
+            if before and after:
+                self.sessions.refingerprint(username, before, after)
 
     def login(self, username: str) -> str:
         """Starts a session for a user whose password was checked; returns the cookie value."""

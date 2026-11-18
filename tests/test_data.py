@@ -16,11 +16,12 @@ from helpers import (
     video_ids,
 )
 from promin.db import DB_NAME, Database
+from promin.encoding import Encoding
 
 
 def test_a_transaction_stores_everything_or_nothing(tmp_path):
     db = Database(tmp_path / DB_NAME)
-    assert db.open() is True
+    db.open()
     with pytest.raises(RuntimeError):
         with db.transaction():
             db.run("INSERT INTO folders (id, name, created) VALUES ('a', 'A', 1)")
@@ -33,16 +34,53 @@ def test_a_transaction_stores_everything_or_nothing(tmp_path):
     db.close()
 
     again = Database(tmp_path / DB_NAME)
-    assert again.open() is False  # not new any more
+    again.open()
     assert [row["id"] for row in again.all("SELECT id FROM folders")] == ["a"]
     again.close()
 
 
 def test_data_file_is_private(tmp_path):
-    with make_client(tmp_path):
-        pass
+    with make_client(tmp_path) as c:
+        assert add_user(c).status_code == 201
+        # The journal next to it too, while the service runs: the hashes pass through it.
+        names = [path.name for path in tmp_path.glob(DB_NAME + "*")]
+        assert DB_NAME + "-wal" in names
+        for name in names:
+            assert (tmp_path / name).stat().st_mode & 0o077 == 0, name
     for name in (DB_NAME, DB_NAME + ".bak"):
         assert (tmp_path / name).stat().st_mode & 0o077 == 0, name
+
+
+def test_a_database_in_trouble_but_not_damaged_is_left_where_it_is(tmp_path, monkeypatch):
+    """Locked by another process, a full disk: the service does not start, and the file is
+    neither moved aside nor replaced by the copy."""
+    with make_client(tmp_path) as c:
+        add_fake_video(c, tmp_path, "aaa")
+    before = (tmp_path / DB_NAME).read_bytes()
+
+    def locked(conn):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(Database, "_migrate", staticmethod(locked))
+    with pytest.raises(sqlite3.OperationalError):
+        Database(tmp_path / DB_NAME).open()
+    assert (tmp_path / DB_NAME).read_bytes() == before
+    assert not list(tmp_path.glob(DB_NAME + "*.broken-*"))
+
+
+def test_when_the_copy_is_damaged_too_both_are_kept_aside(tmp_path):
+    with make_client(tmp_path) as c:
+        add_fake_video(c, tmp_path, "aaa")
+    (tmp_path / DB_NAME).write_bytes(b"the database, damaged")
+    (tmp_path / (DB_NAME + ".bak")).write_bytes(b"the copy, damaged")
+    with make_client(tmp_path) as c:
+        assert video_ids(c) == set()
+    # A journal that was lying next to the database goes aside with it; it is not looked at here.
+    kept = sorted(
+        path.read_bytes() for path in tmp_path.glob(DB_NAME + "*.broken-*")
+        if not path.name.endswith(("-wal", "-shm"))
+    )
+    assert kept == [b"the copy, damaged", b"the database, damaged"]
 
 
 def test_damaged_data_file_falls_back_to_the_copy_of_the_last_start(tmp_path):
@@ -201,10 +239,35 @@ def test_damaged_json_file_is_left_out_and_the_rest_is_brought_over(tmp_path, na
     assert list(tmp_path.glob(name + ".json.broken-*"))
 
 
-def test_stored_settings_that_no_longer_fit_fall_back_to_defaults(tmp_path):
-    old_files(tmp_path, encoding={"max_height": 999})
+@pytest.mark.parametrize("stored", [{"max_height": 999}, {"crf": "21"}, {"max_bitrate_kbps": None}, [1]])
+def test_stored_settings_that_no_longer_fit_fall_back_to_defaults(tmp_path, stored):
+    old_files(tmp_path, encoding=stored)
     with make_client(tmp_path) as c:
-        assert c.get("/api/settings").json()["encoding"]["max_height"] == 1080
+        assert c.get("/api/settings").json()["encoding"] == Encoding().__dict__
+
+
+def test_a_first_start_that_was_cut_short_still_brings_the_files_over(tmp_path):
+    """The database is there, made a moment before the power went, and the JSON files were
+    not read yet: the next start reads them."""
+    db = Database(tmp_path / DB_NAME)
+    db.open()
+    db.close()
+    old_files(tmp_path, videos={"aaa": OLD_VIDEO})
+    with make_client(tmp_path) as c:
+        assert video_ids(c) == {"aaa"}
+
+
+def test_old_copies_of_the_json_files_never_come_back(tmp_path):
+    old_files(tmp_path, videos={"aaa": OLD_VIDEO})
+    (tmp_path / "videos.json.bak").write_text(json.dumps({"old": dict(OLD_VIDEO, id="old")}), encoding="utf-8")
+    with make_client(tmp_path) as c:
+        assert video_ids(c) == {"aaa"}
+    assert not (tmp_path / "videos.json.bak").exists()
+    # Even a database that had to be started over does not read them.
+    (tmp_path / DB_NAME).write_bytes(b"damaged")
+    (tmp_path / (DB_NAME + ".bak")).write_bytes(b"damaged")
+    with make_client(tmp_path) as c:
+        assert video_ids(c) == set()
 
 
 def test_users_and_their_passwords_survive_restart(tmp_path):

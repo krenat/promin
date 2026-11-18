@@ -68,7 +68,7 @@ class UserStore:
 
     def add(self, username: str, password: str, role: Role) -> bool:
         """False if the name is taken."""
-        salt, digest, rounds = self._hashed(password)
+        salt, digest, rounds = self.hashed(password)
         return self.db.run(
             "INSERT OR IGNORE INTO users (username, role, salt, hash, rounds, created)"
             " VALUES (?, ?, ?, ?, ?, ?)",
@@ -76,7 +76,9 @@ class UserStore:
         ) > 0
 
     @staticmethod
-    def _hashed(password: str) -> Tuple[str, str, int]:
+    def hashed(password: str) -> Tuple[str, str, int]:
+        """A password as it is stored: the salt, the hash and its rounds. Slow on purpose,
+        so it is worked out before the database is touched, never inside a transaction."""
         salt = secrets.token_bytes(16)
         rounds = crypto.PBKDF2_ROUNDS
         return salt.hex(), hash_password(password, salt, rounds), rounds
@@ -84,7 +86,12 @@ class UserStore:
     def set_password(self, username: str, password: str, only_if_hash: Optional[str] = None) -> bool:
         """Stores a new hash of the password. With `only_if_hash`, only while the user still
         has that hash: a password changed in the meantime is left alone."""
-        salt, digest, rounds = self._hashed(password)
+        return self.set_hash(username, self.hashed(password), only_if_hash)
+
+    def set_hash(
+        self, username: str, hashed: Tuple[str, str, int], only_if_hash: Optional[str] = None
+    ) -> bool:
+        salt, digest, rounds = hashed
         sql = "UPDATE users SET salt = ?, hash = ?, rounds = ? WHERE username = ?"
         params: List[Any] = [salt, digest, rounds, username]
         if only_if_hash is not None:

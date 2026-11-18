@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import secrets
 import time
@@ -207,10 +206,8 @@ class TvTest:
 
     def load(self) -> None:
         self.result = None
-        row = self.db.one("SELECT value FROM settings WHERE key = ?", (self.KEY,))
-        if row is not None:
-            with suppress(ValueError, TypeError, KeyError, AttributeError):  # shown as no check yet
-                self.result = tvtest_record(json.loads(row["value"]))
+        with suppress(TypeError, KeyError, AttributeError):  # shown as no check yet
+            self.result = tvtest_record(self.db.get_setting(self.KEY))
 
     def begin(self) -> str:
         self.status, self.run, self.step, self.error = "preparing", secrets.token_hex(8), 0, None
@@ -223,10 +220,7 @@ class TvTest:
         result = clean_tvtest_report(message, self.levels)
         result["fits"] = tvtest_fits(result)
         result["finished"] = time.time()
-        self.db.run(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-            (self.KEY, json.dumps(result, ensure_ascii=False)),
-        )
+        self.db.set_setting(self.KEY, result)
         self.result = result
         self.status, self.run, self.error = "idle", None, None
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from .hub import Hub
-from .library import QueueStore, VideoStore
+from .library import QueuedVideo, QueueStore, VideoStore
 
 
 class Playback:
@@ -13,18 +13,9 @@ class Playback:
         self.queue = queue
         self.videos = videos
 
-    def queue_view(self) -> List[Dict[str, Any]]:
+    def queue_view(self) -> List[QueuedVideo]:
         """The queue as phones show it: only videos that can still be played."""
-        items = []
-        for entry in self.queue.list():
-            item = self.videos.get(entry["video_id"])
-            if item and item["status"] == "ready":
-                items.append({
-                    "entry": entry["entry"], "video_id": item["id"], "name": item["name"],
-                    "duration": item.get("duration"), "thumb": bool(item.get("thumb")),
-                    "thumb_v": item.get("thumb_v"),
-                })
-        return items
+        return self.queue.playable()
 
     async def queue_changed(self) -> Dict[str, Any]:
         """Tells every remote about the new queue; returns it as an API response."""
