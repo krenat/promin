@@ -34,9 +34,18 @@ document.getElementById('pair-link').addEventListener('click', function (e) {
 var side = document.getElementById('side');
 var menuBtn = document.getElementById('menu-btn');
 
+var behindSide = [document.querySelector('main'), document.getElementById('dock')];
+
 function toggleSide(open) {
-  document.body.classList.toggle('side-open', open);
-  menuBtn.setAttribute('aria-expanded', String(document.body.classList.contains('side-open')));
+  var was = document.body.classList.contains('side-open');
+  var now = document.body.classList.toggle('side-open', open);
+  if (now === was) return;
+  menuBtn.setAttribute('aria-expanded', String(now));
+  // While the drawer is open the page behind it is out of reach, for a keyboard and a
+  // screen reader as well as for a finger.
+  behindSide.forEach(function (part) { part.inert = now; });
+  if (now) side.focus();
+  else menuBtn.focus();
 }
 
 menuBtn.addEventListener('click', function () { toggleSide(); });
@@ -46,13 +55,13 @@ side.addEventListener('click', function (e) {
   if (e.target.closest('a, button')) toggleSide(false);
 });
 
-// The remote lies over the page: the list leaves it room.
-var dock = document.getElementById('dock');
-function fitDock() {
-  document.documentElement.style.setProperty('--dock-h', dock.offsetHeight + 'px');
+// On a wide screen the menu is always there and is not a drawer: one left open closes.
+if (typeof matchMedia === 'function') {
+  var wide = matchMedia('(min-width: 900px)');
+  var onWide = function () { if (wide.matches) toggleSide(false); };
+  if (wide.addEventListener) wide.addEventListener('change', onWide);
+  else wide.addListener(onWide);
 }
-if (typeof ResizeObserver === 'function') new ResizeObserver(fitDock).observe(dock);
-fitDock();
 
 document.addEventListener('keydown', function (e) {
   if (e.key !== 'Escape') return;

@@ -39,11 +39,20 @@ function updateTv() {
   renderQueue();
 }
 
+// The remote lies over the page, and the list leaves it exactly the room it takes.
+var dock = document.getElementById('dock');
+function fitDock() {
+  document.documentElement.style.setProperty('--dock-h', dock.offsetHeight + 'px');
+}
+// A browser that cannot watch the size is told whenever the remote changes.
+var watched = typeof ResizeObserver === 'function';
+if (watched) new ResizeObserver(fitDock).observe(dock);
+
 export function updateRemote() {
   var panel = document.getElementById('remote');
   var active = state.tvConnected && !!state.tvState && !!state.tvState.video_id;
   panel.hidden = !active;
-  document.body.classList.toggle('has-remote', active);
+  if (!watched) setTimeout(fitDock, 0);
   if (!active) return;
   document.getElementById('remote-title').textContent = state.tvState.name || '';
   var icon = state.tvState.paused ? ICON_PLAY : ICON_PAUSE;
@@ -140,6 +149,7 @@ document.getElementById('r-stop').addEventListener('click', function () { comman
 document.getElementById('tv-disconnect').addEventListener('click', function () { command('disconnect'); });
 document.getElementById('remote-toggle').addEventListener('click', function () {
   document.body.classList.toggle('remote-collapsed');
+  if (!watched) fitDock();
 });
 document.getElementById('r-seek').addEventListener('input', function () {
   seeking = true;
