@@ -7,6 +7,8 @@ import { errorText, formatSize, message } from './ui.js';
 
 var fileInput = document.getElementById('file');
 export var uploadBtn = document.getElementById('upload-btn');
+// The small copy of the button in the header of a phone.
+export var uploadQuick = document.getElementById('upload-quick');
 var progress = document.getElementById('progress');
 var progressName = document.getElementById('progress-name');
 var progressPct = document.getElementById('progress-pct');
@@ -18,7 +20,7 @@ function upload(file) {
     message.textContent = 'Файл завеликий: ' + formatSize(file.size) + ', дозволено до ' + formatSize(state.maxUpload) + '.';
     return;
   }
-  uploadBtn.disabled = true;
+  uploadBtn.disabled = uploadQuick.disabled = true;
   progress.hidden = false;
   progressName.textContent = file.name;
   progressPct.textContent = '0%';
@@ -36,7 +38,7 @@ function upload(file) {
     progressBar.style.width = pct + '%';
   };
   function done() {
-    uploadBtn.disabled = false;
+    uploadBtn.disabled = uploadQuick.disabled = false;
     progress.hidden = true;
     fileInput.value = '';
   }
@@ -58,6 +60,7 @@ function upload(file) {
 }
 
 uploadBtn.addEventListener('click', function () { fileInput.click(); });
+uploadQuick.addEventListener('click', function () { fileInput.click(); });
 fileInput.addEventListener('change', function () {
   if (fileInput.files.length) upload(fileInput.files[0]);
 });

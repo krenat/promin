@@ -380,6 +380,22 @@ body.selecting .thumb .play { display: none; }
   opacity: 0; visibility: hidden; transition: opacity 200ms, visibility 200ms;
 }
 #menu-btn { margin-left: -12px; }
+/* On a phone the upload button of the menu is a tap away, so the header has a small one too. */
+#upload-quick {
+  flex: none; width: 40px; height: 40px; min-height: 40px; padding: 0;
+  display: grid; place-items: center; border-radius: 50%;
+}
+#upload-quick svg { width: 22px; height: 22px; fill: currentColor; }
+@media (max-width: 899px) {
+  #upload-quick { order: 1; }
+  .projector { min-width: 0; }
+  #tv-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .projector .dot { flex: none; }
+}
+@media (max-width: 419px) {
+  header img { display: none; }
+  .projector { font-size: 13px; gap: 6px; }
+}
 @media (max-width: 899px) {
   #side { transform: translateX(-100%); visibility: hidden; transition: transform 200ms, visibility 200ms; }
   body.side-open #side { transform: none; visibility: visible; }
@@ -389,7 +405,7 @@ body.selecting .thumb .play { display: none; }
 @media (min-width: 900px) {
   main { margin-left: 264px; padding-left: 24px; padding-right: 24px; }
   #dock { left: 264px; }
-  #menu-btn, header img, header h1 { display: none; }
+  #menu-btn, #upload-quick, header img, header h1 { display: none; }
   header { justify-content: flex-end; }
 }
 @media (prefers-reduced-motion: reduce) {

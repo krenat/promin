@@ -6,7 +6,7 @@ import { refresh, renderList } from './library.js';
 import { setSelecting, updateSelectBar } from './selection.js';
 import { state } from './state.js';
 import { displayName, message } from './ui.js';
-import { uploadBtn } from './upload.js';
+import { uploadBtn, uploadQuick } from './upload.js';
 
 var FOLDER_KEY = 'promin.folder';
 try { state.currentFolder = localStorage.getItem(FOLDER_KEY) || 'all'; } catch (e) {}
@@ -63,6 +63,8 @@ export function renderFolders() {
   var folder = folderById(state.currentFolder);
   document.getElementById('folder-tools').hidden = !(folder && state.canManage);
   uploadBtn.textContent = folder ? 'Завантажити в «' + folder.name + '»' : 'Завантажити відео';
+  uploadQuick.title = uploadBtn.textContent;
+  uploadQuick.setAttribute('aria-label', uploadBtn.textContent);
 }
 
 function folderRequest(method, url, body) {
