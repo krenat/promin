@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import secrets
 import time
-from typing import List, Literal, Optional, TypedDict
+from typing import Any, List, Literal, Optional, Tuple, TypedDict
 
 from . import crypto
 from .crypto import hash_password, hash_secret
@@ -76,7 +76,7 @@ class UserStore:
         ) > 0
 
     @staticmethod
-    def _hashed(password: str) -> tuple:
+    def _hashed(password: str) -> Tuple[str, str, int]:
         salt = secrets.token_bytes(16)
         rounds = crypto.PBKDF2_ROUNDS
         return salt.hex(), hash_password(password, salt, rounds), rounds
@@ -86,7 +86,7 @@ class UserStore:
         has that hash: a password changed in the meantime is left alone."""
         salt, digest, rounds = self._hashed(password)
         sql = "UPDATE users SET salt = ?, hash = ?, rounds = ? WHERE username = ?"
-        params = [salt, digest, rounds, username]
+        params: List[Any] = [salt, digest, rounds, username]
         if only_if_hash is not None:
             sql += " AND hash = ?"
             params.append(only_if_hash)

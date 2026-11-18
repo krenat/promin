@@ -3,43 +3,43 @@ from __future__ import annotations
 
 import html
 import re
-from typing import Annotated, Any, Dict
+from typing import Annotated, cast
 
 from fastapi import Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from starlette.requests import HTTPConnection
 
 from ..assets import asset_version
-from ..auth import COOKIE_MAX_AGE, COOKIE_NAME, NotAuthenticated
+from ..auth import COOKIE_MAX_AGE, COOKIE_NAME, NotAuthenticated, Principal
 from ..config import TEMPLATES_DIR
 from ..services import Services
 
 
 def services(conn: HTTPConnection) -> Services:
-    return conn.app.state.services
+    return cast(Services, conn.app.state.services)
 
 
 Svc = Annotated[Services, Depends(services)]
 
 
-def require_auth(conn: HTTPConnection, svc: Svc) -> Dict[str, Any]:
+def require_auth(conn: HTTPConnection, svc: Svc) -> Principal:
     user = svc.auth.current_user(conn)
     if user is None:
         raise NotAuthenticated()
     return user
 
 
-User = Annotated[Dict[str, Any], Depends(require_auth)]
+User = Annotated[Principal, Depends(require_auth)]
 
 
-def require_member(user: User) -> Dict[str, Any]:
+def require_member(user: User) -> Principal:
     """A person with a login, as opposed to a paired projector."""
     if user["role"] == "device":
         raise HTTPException(403, "Проектор може лише показувати відео")
     return user
 
 
-def require_admin(user: User) -> Dict[str, Any]:
+def require_admin(user: User) -> Principal:
     if user["role"] != "admin":
         raise HTTPException(403, "Це може робити лише адміністратор")
     return user

@@ -4,7 +4,7 @@ from __future__ import annotations
 import secrets
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Dict, List, Optional, TypedDict
 
 from .accounts import SESSION_IDLE_TTL
 from .crypto import hash_secret, same
@@ -96,6 +96,18 @@ class DeviceStore:
         return self.db.run("DELETE FROM devices WHERE id = ?", (device_id,)) > 0
 
 
+class PendingPairing(TypedDict):
+    key: str  # the approval key, shown in the QR code
+    created: float
+    approved_by: Optional[str]  # who confirmed it on a phone; None until someone does
+
+
+class PairingStart(TypedDict):
+    key: str
+    token: str  # the polling token, which stays with the projector
+    expires_in: int
+
+
 class Pairing:
     """Projectors that are showing a QR code right now. They live in memory only.
 
@@ -105,14 +117,14 @@ class Pairing:
     """
 
     def __init__(self) -> None:
-        self.pending: Dict[str, Dict[str, Any]] = {}  # polling token → entry
+        self.pending: Dict[str, PendingPairing] = {}  # polling token → entry
 
     def purge(self) -> None:
         cutoff = time.monotonic() - PAIR_CODE_TTL
         for token in [t for t, entry in self.pending.items() if entry["created"] < cutoff]:
             del self.pending[token]
 
-    def start(self) -> Optional[Dict[str, Any]]:
+    def start(self) -> Optional[PairingStart]:
         self.purge()
         if len(self.pending) >= PAIR_MAX_PENDING:
             return None
@@ -121,7 +133,7 @@ class Pairing:
         self.pending[token] = {"key": key, "created": time.monotonic(), "approved_by": None}
         return {"key": key, "token": token, "expires_in": PAIR_CODE_TTL}
 
-    def by_key(self, key: str) -> Optional[Dict[str, Any]]:
+    def by_key(self, key: str) -> Optional[PendingPairing]:
         self.purge()
         for entry in self.pending.values():
             if entry["approved_by"] is None and same(entry["key"], key):

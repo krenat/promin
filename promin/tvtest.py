@@ -8,13 +8,13 @@ import secrets
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, TypedDict
 
 from .config import MB
-from .encoding import FPS_CHOICES, HEIGHTS, SUGGESTED_KBPS
 from .db import Database, sibling
-from .parsing import finite
+from .encoding import FPS_CHOICES, HEIGHTS, SUGGESTED_KBPS
 from .ffmpeg import ProcessingError, reap
+from .parsing import finite
 
 # The projector check: the projector plays a generated clip for every resolution and frame
 # rate offered on the settings page and reports how it went, and measures its download speed.
@@ -31,13 +31,23 @@ TVTEST_CLIP_TIMEOUT_SECONDS = 5 * 60
 NETWORK_SHARE = 0.5
 
 
-def tvtest_levels() -> List[Dict[str, Any]]:
+class Level(TypedDict):
+    """One clip of the check: a resolution and a frame rate."""
+
+    id: str  # "1080p60"
+    height: int
+    fps: int
+    kbps: int
+    needs: Optional[str]  # the clip that has to play smoothly before this one is tried
+
+
+def tvtest_levels() -> List[Level]:
     """The clips of the projector check, easiest first.
 
     `needs` names the clip that has to play smoothly before this one is worth trying: the
     same resolution at the lower frame rate, or the resolution below.
     """
-    levels: List[Dict[str, Any]] = []
+    levels: List[Level] = []
     base_fps = min(FPS_CHOICES)
     lower = None
     for height in sorted(HEIGHTS):
@@ -51,11 +61,11 @@ def tvtest_levels() -> List[Dict[str, Any]]:
     return levels
 
 
-def tvtest_clip_name(level: Dict[str, Any]) -> str:
+def tvtest_clip_name(level: Level) -> str:
     return "v%d-%s.mp4" % (TVTEST_VERSION, level["id"])
 
 
-def tvtest_clip_args(ffmpeg: str, level: Dict[str, Any], out: Path) -> List[str]:
+def tvtest_clip_args(ffmpeg: str, level: Level, out: Path) -> List[str]:
     """A test clip encoded the way real videos are: H.264 High at the bitrate the settings
     page suggests for this resolution, with an audio track.
 
@@ -79,7 +89,7 @@ def tvtest_clip_args(ffmpeg: str, level: Dict[str, Any], out: Path) -> List[str]
     ]
 
 
-async def make_tvtest_clip(ffmpeg: str, level: Dict[str, Any], folder: Path) -> None:
+async def make_tvtest_clip(ffmpeg: str, level: Level, folder: Path) -> None:
     """Generates the clip of this level unless it is already there."""
     final = folder / tvtest_clip_name(level)
     if final.is_file():
@@ -99,7 +109,7 @@ async def make_tvtest_clip(ffmpeg: str, level: Dict[str, Any], folder: Path) -> 
         tmp.unlink(missing_ok=True)
 
 
-def clean_tvtest_report(message: Dict[str, Any], levels: List[Dict[str, Any]]) -> Dict[str, Any]:
+def clean_tvtest_report(message: Dict[str, Any], levels: List[Level]) -> Dict[str, Any]:
     """What the projector reported, as known fields of known types, with a verdict for
     every clip: ok (smooth), rough (played, but did not keep up), failed or skipped."""
     reports: Dict[str, Dict[str, Any]] = {}
@@ -113,7 +123,9 @@ def clean_tvtest_report(message: Dict[str, Any], levels: List[Dict[str, Any]]) -
         advance = max(0.0, min(finite(entry.get("advance")), 2.0))
         frames = max(0, int(finite(entry.get("frames"))))
         dropped = max(0, min(int(finite(entry.get("dropped"))), frames))
-        clip = {key: level[key] for key in ("id", "height", "fps", "kbps")}
+        clip: Dict[str, Any] = {
+            "id": level["id"], "height": level["height"], "fps": level["fps"], "kbps": level["kbps"],
+        }
         if entry.get("outcome") == "played":
             # Without frame counters (frames is 0) only the clock is left to judge by.
             smooth = advance >= TVTEST_MIN_ADVANCE and dropped <= frames * TVTEST_MAX_DROPPED
@@ -163,14 +175,17 @@ def tvtest_fits(result: Dict[str, Any]) -> Dict[str, Any]:
 def tvtest_record(data: Any) -> Dict[str, Any]:
     """A finished projector check as TvTest.finish saved it; KeyError or TypeError if the
     stored one is not that."""
-    parts = [(data, ("clips", "device", "fits", "finished", "speed_kbps"))]
+    parts: List[Tuple[Any, Sequence[str]]] = [
+        (data, ("clips", "device", "fits", "finished", "speed_kbps"))
+    ]
     parts += [(clip, ("id", "height", "fps", "status")) for clip in data["clips"]]
     parts += [(data["device"], ("agent",)), (data["fits"], ("max_height", "max_fps"))]
     for part, keys in parts:
         missing = [key for key in keys if key not in part]
         if missing:
             raise KeyError(", ".join(missing))
-    return data
+    record: Dict[str, Any] = data
+    return record
 
 
 class TvTest:
@@ -182,12 +197,13 @@ class TvTest:
         self.db = db
         self.levels = tvtest_levels()
         self.result: Optional[Dict[str, Any]] = None
-        self.status = "idle"  # idle → preparing (clips are generated) → running → idle
+        # idle → preparing (clips are generated) → running → idle
+        self.status: Literal["idle", "preparing", "running"] = "idle"
         self.run: Optional[str] = None
         self.step = 0
         self.error: Optional[str] = None
         self.seen = 0.0  # when the projector last reported
-        self.task: Optional[asyncio.Task] = None
+        self.task: Optional[asyncio.Task[None]] = None
 
     def load(self) -> None:
         self.result = None

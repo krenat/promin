@@ -80,7 +80,8 @@ async def retry_video(video_id: str, svc: Svc) -> Dict[str, Any]:
         raise HTTPException(404, "Відео не знайдено")
     if item["status"] != "error":
         raise HTTPException(409, "Повторити можна лише відео з помилкою")
-    if not item.get("source") or not (svc.settings.uploads_dir / item["source"]).is_file():
+    source = item["source"]
+    if not source or not (svc.settings.uploads_dir / source).is_file():
         raise HTTPException(409, "Оригінал не зберігся, завантажте відео ще раз")
     svc.videos.update(video_id, status="queued", error=None)
     svc.transcoder.enqueue(video_id)

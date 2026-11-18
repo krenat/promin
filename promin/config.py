@@ -26,7 +26,7 @@ class Settings:
     x264_preset: str = "veryfast"
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         env = os.environ
         return cls(
             data_dir=Path(env.get("PROMIN_DATA_DIR", "./data")).resolve(),

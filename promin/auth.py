@@ -4,12 +4,12 @@ from __future__ import annotations
 import asyncio
 import hmac
 import time
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Literal, Optional, TypedDict
 
 from starlette.requests import HTTPConnection
 
-from .accounts import BUILTIN_ADMIN, SESSION_IDLE_TTL, SessionStore, UserStore
 from . import crypto
+from .accounts import BUILTIN_ADMIN, SESSION_IDLE_TTL, SessionStore, UserStore
 from .crypto import hash_password, hash_secret, same
 from .devices import DEVICE_IDLE_TTL, DeviceStore
 
@@ -22,6 +22,18 @@ SESSION_TOUCH_EVERY = 24 * 3600  # how often to record that a session was used
 LOGIN_MAX_FAILURES = 5
 LOGIN_WINDOW_SECONDS = 15 * 60
 LIMITER_MAX_ADDRESSES = 5000  # past this many, addresses with no recent failures are forgotten
+
+
+class _Principal(TypedDict):
+    username: str
+    # "device" is a paired projector: it has no login and may only show videos.
+    role: Literal["admin", "viewer", "device"]
+
+
+class Principal(_Principal, total=False):
+    """Who is asking, as the cookie tells."""
+
+    device_id: str  # only for a paired projector
 
 
 class NotAuthenticated(Exception):
@@ -92,7 +104,7 @@ class Auth:
         message = (username + "|" + source).encode("utf-8")
         return hmac.new(self._secret, message, "sha256").hexdigest()
 
-    def current_user(self, conn: HTTPConnection) -> Optional[Dict[str, Any]]:
+    def current_user(self, conn: HTTPConnection) -> Optional[Principal]:
         raw = conn.cookies.get(COOKIE_NAME, "")
         if raw.startswith("@"):  # a paired projector
             device_id, _, secret = raw[1:].partition(".")
@@ -120,8 +132,12 @@ class Auth:
             return None
         if idle > SESSION_TOUCH_EVERY:
             self.sessions.touch(session_id)
-        role = "admin" if username == BUILTIN_ADMIN else (self.users.get(username) or {}).get("role")
-        return {"username": username, "role": role}
+        if username == BUILTIN_ADMIN:
+            return {"username": username, "role": "admin"}
+        user = self.users.get(username)
+        if user is None:  # deleted a moment ago
+            return None
+        return {"username": username, "role": user["role"]}
 
     async def check_password(self, username: str, password: str) -> bool:
         if username == BUILTIN_ADMIN:

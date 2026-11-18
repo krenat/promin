@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, quote
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from ..auth import COOKIE_NAME, NotAuthenticated
+from ..auth import COOKIE_NAME
 from .deps import AUTH, Svc, User, client_address, page, set_login_cookie
 
 LOGIN_MAX_BODY = 4096
@@ -26,7 +26,7 @@ def safe_next(value: Optional[str]) -> str:
     return "/"
 
 
-async def not_authenticated(request: Request, exc: NotAuthenticated) -> Response:
+async def not_authenticated(request: Request, exc: Exception) -> Response:
     """What someone without a login gets: pages lead to the login form, the API says 401."""
     if request.method == "GET" and not request.url.path.startswith("/api/"):
         path = request.url.path
@@ -92,4 +92,4 @@ async def me(request: Request, response: Response, user: User) -> Dict[str, Any]
     # Every page asks this as it opens, so the cookie is renewed here: the browser keeps
     # it for COOKIE_MAX_AGE after the last visit, not after the login or the pairing.
     set_login_cookie(request, response, request.cookies[COOKIE_NAME])
-    return user
+    return dict(user)

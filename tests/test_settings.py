@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from helpers import change_stored
-from helpers import NEW_ENCODING, make_client, needs_ffmpeg, probe_video, upload, wait_done
+from helpers import NEW_ENCODING, change_stored, make_client, needs_ffmpeg, probe_video, upload, wait_done
 
 
 def test_settings_default_to_the_environment(tmp_path):

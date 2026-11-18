@@ -6,9 +6,9 @@ import time
 
 import pytest
 
-from helpers import count_commits
 from helpers import (
     add_fake_video,
+    count_commits,
     make_client,
     needs_ffmpeg,
     probe_video,

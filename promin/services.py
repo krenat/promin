@@ -12,10 +12,10 @@ from .config import Settings
 from .db import DB_NAME, Database
 from .devices import PAIR_CODE_TTL, PAIR_STARTS_PER_WINDOW, DeviceStore, Pairing
 from .encoding import Encoding, EncodingStore
-from .library import PUBLIC_KEYS, FolderStore, QueueStore, Video, VideoStore, remove_files
-from .playback import Playback
 from .hub import WS_UNAUTHORIZED, Hub
 from .legacy import import_json
+from .library import PUBLIC_KEYS, FolderStore, QueueStore, Video, VideoStore, remove_files
+from .playback import Playback
 from .transcode import Transcoder
 from .tvtest import TvTest
 
@@ -43,7 +43,7 @@ class Services:
     tvtest: TvTest
 
     @classmethod
-    def create(cls, settings: Settings) -> "Services":
+    def create(cls, settings: Settings) -> Services:
         db = Database(settings.data_dir / DB_NAME)
         videos = VideoStore(db)
         queue = QueueStore(db)

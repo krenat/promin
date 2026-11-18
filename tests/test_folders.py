@@ -1,13 +1,10 @@
 """Folders of the library."""
 from __future__ import annotations
 
-import json
-
 import pytest
 from fastapi.testclient import TestClient
 
-from helpers import count_commits
-from helpers import add_fake_video, make_client, pair_key, pair_status, start_pairing
+from helpers import add_fake_video, count_commits, make_client, pair_key, pair_status, start_pairing
 
 
 def make_folder(client: TestClient, name: str) -> str:

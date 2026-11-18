@@ -5,7 +5,7 @@ import json
 import secrets
 import sqlite3
 import time
-from typing import Any, Dict, List, Literal, Optional, Set, TypedDict
+from typing import Any, List, Literal, Optional, Set, TypedDict
 from urllib.parse import unquote
 
 from .config import Settings

@@ -4,7 +4,16 @@ from __future__ import annotations
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
-from helpers import needs_ffmpeg, pair_key, pair_status, remote_closes, start_pairing, tv_state, upload, wait_done
+from helpers import (
+    needs_ffmpeg,
+    pair_key,
+    pair_status,
+    remote_closes,
+    start_pairing,
+    tv_state,
+    upload,
+    wait_done,
+)
 
 
 def test_websocket_requires_login(anon):
@@ -149,7 +158,7 @@ def test_a_failed_connection_is_logged(client, caplog):
     with client.websocket_connect("/ws?role=remote") as ws:
         ws.receive_json()
         ws.send_text("not json")
-        with pytest.raises(Exception):
+        with pytest.raises(WebSocketDisconnect):
             ws.receive_json()
     assert "A remote connection failed" in caplog.text
 

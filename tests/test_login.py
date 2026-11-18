@@ -6,20 +6,19 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from promin.app import create_app
-from promin.config import Settings
-
-from helpers import change_stored
 from helpers import (
     TOKEN,
     VIEWER_PASSWORD,
     add_user,
+    change_stored,
     make_client,
     pair_key,
     sign_in,
     start_pairing,
     upload,
 )
+from promin.app import create_app
+from promin.config import Settings
 
 
 def test_pages_redirect_to_login(anon):

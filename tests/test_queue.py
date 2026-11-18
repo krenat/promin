@@ -1,12 +1,18 @@
 """The shared watch queue."""
 from __future__ import annotations
 
-import json
-
 from fastapi.testclient import TestClient
 
-from helpers import change_stored, stored
-from helpers import add_fake_video, make_client, pair_key, pair_status, start_pairing, tv_state
+from helpers import (
+    add_fake_video,
+    change_stored,
+    make_client,
+    pair_key,
+    pair_status,
+    start_pairing,
+    stored,
+    tv_state,
+)
 
 
 def queue_names(client: TestClient) -> list:

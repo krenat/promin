@@ -8,10 +8,9 @@ from pathlib import Path
 
 import pytest
 
+from helpers import make_client
 from promin.app import create_app
 from promin.config import Settings
-
-from helpers import TOKEN, make_client
 
 
 def test_app_refuses_to_start_without_token(tmp_path):

@@ -2,17 +2,23 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import shutil
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
-from promin.encoding import Encoding
-from promin.ffmpeg import HDR_FILTER_ZSCALE, ProcessingError, build_ffmpeg_args, plan_encode, thumbnail_args, video_info
-
 from helpers import FFMPEG, make_client, needs_ffmpeg, upload, wait_done
+from promin.encoding import Encoding
+from promin.ffmpeg import (
+    HDR_FILTER_ZSCALE,
+    ProcessingError,
+    build_ffmpeg_args,
+    plan_encode,
+    thumbnail_args,
+    video_info,
+)
 
 
 def fake_probe(**video) -> dict:

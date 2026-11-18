@@ -69,7 +69,17 @@ python3 -m venv .venv
 PROMIN_TOKEN=local-dev-token-123 .venv/bin/python main.py
 ```
 
-The page opens at `http://localhost:8080`; the login is `admin` and the password is the value of `PROMIN_TOKEN`. Tests: `.venv/bin/python -m pytest`. GitHub Actions runs them on every pull request with the pinned versions.
+The page opens at `http://localhost:8080`; the login is `admin` and the password is the value of `PROMIN_TOKEN`.
+
+The checks, all three run by GitHub Actions on every pull request with the pinned versions:
+
+```bash
+.venv/bin/python -m pytest   # the tests
+.venv/bin/ruff check .       # mistakes and style
+.venv/bin/mypy               # types, in strict mode
+```
+
+What a video, a user, a session or the state of the projector consists of is written down as a type next to the store that keeps it (`Video` in `library`, `Principal` in `auth`, `PlayerState` in `hub`, and so on), so a mistyped field name fails the type check instead of a request.
 
 ## Running on a server with Docker
 

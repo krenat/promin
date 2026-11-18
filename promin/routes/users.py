@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict
+from typing import Any, Dict, cast
 
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from ..accounts import BUILTIN_ADMIN, MIN_PASSWORD_LENGTH, ROLES, USERNAME_RE
+from ..accounts import BUILTIN_ADMIN, MIN_PASSWORD_LENGTH, ROLES, USERNAME_RE, Role
 from .deps import ADMIN, AUTH, Svc, User, page
 
 router = APIRouter()
@@ -57,7 +57,7 @@ async def create_user(body: NewUser, svc: Svc) -> Dict[str, Any]:
         raise HTTPException(400, "Невідома роль")
     check_new_password(body.password)
     if username == BUILTIN_ADMIN or not await asyncio.to_thread(
-        svc.users.add, username, body.password, body.role
+        svc.users.add, username, body.password, cast(Role, body.role)
     ):
         raise HTTPException(409, "Такий користувач уже є")
     return {"username": username, "role": body.role}

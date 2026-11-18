@@ -13,10 +13,15 @@ from typing import Any, Dict, List, Optional, Tuple
 from .config import Settings
 from .encoding import EncodingStore
 from .ffmpeg import (
-    ProcessingError, build_ffmpeg_args, detect_hdr_filter, plan_encode, reap, thumbnail_args,
+    ProcessingError,
+    build_ffmpeg_args,
+    detect_hdr_filter,
+    plan_encode,
+    reap,
+    thumbnail_args,
     video_info,
 )
-from .library import VideoStore, remove_files
+from .library import VideoInfo, VideoStore, remove_files
 
 log = logging.getLogger(__name__)
 
@@ -41,9 +46,9 @@ class Transcoder:
         self.hdr_filter: Optional[str] = None
         self.stall_seconds = FFMPEG_STALL_SECONDS
         self.progress: Dict[str, float] = {}
-        self._queue: Optional[asyncio.Queue] = None
-        self._task: Optional[asyncio.Task] = None
-        self._thumb_task: Optional[asyncio.Task] = None
+        self._queue: Optional[asyncio.Queue[str]] = None
+        self._task: Optional[asyncio.Task[None]] = None
+        self._thumb_task: Optional[asyncio.Task[None]] = None
         self._current_id: Optional[str] = None
         self._current_proc: Optional[asyncio.subprocess.Process] = None
 
@@ -91,7 +96,7 @@ class Transcoder:
             if info:
                 self.videos.update(item["id"], info=info)
 
-    async def _info(self, video: Path) -> Optional[Dict[str, Any]]:
+    async def _info(self, video: Path) -> Optional[VideoInfo]:
         try:
             return video_info(await self._probe(video))
         except asyncio.CancelledError:
@@ -205,6 +210,7 @@ class Transcoder:
             self.progress.pop(video_id, None)
 
     async def _probe(self, src: Path) -> Dict[str, Any]:
+        assert self.ffprobe is not None
         proc = await asyncio.create_subprocess_exec(
             self.ffprobe, "-v", "error", "-print_format", "json",
             "-show_format", "-show_streams", str(src),
@@ -219,7 +225,8 @@ class Transcoder:
         if proc.returncode != 0:
             detail = " ".join(err.decode(errors="replace").split())
             raise ProcessingError("Файл не вдалося прочитати як відео (%s)" % detail)
-        return json.loads(out)
+        probe: Dict[str, Any] = json.loads(out)
+        return probe
 
     async def _ffmpeg(self, args: List[str], video_id: str, duration: float) -> Tuple[int, str]:
         proc = await asyncio.create_subprocess_exec(
@@ -258,6 +265,7 @@ class Transcoder:
     async def _thumbnail(self, video: Path, video_id: str, duration: float) -> bool:
         out = self.settings.thumbs_dir / (video_id + ".jpg")
         tmp = self.settings.thumbs_dir / (video_id + ".tmp.jpg")
+        assert self.ffmpeg is not None
         proc = await asyncio.create_subprocess_exec(
             *thumbnail_args(self.ffmpeg, video, tmp, duration),
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,

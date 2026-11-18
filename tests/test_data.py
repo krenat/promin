@@ -6,11 +6,16 @@ import sqlite3
 
 import pytest
 
-from promin.db import DB_NAME, Database
-
 from helpers import (
-    NEW_ENCODING, VIEWER_PASSWORD, add_fake_video, add_user, make_client, sign_in, video_ids,
+    NEW_ENCODING,
+    VIEWER_PASSWORD,
+    add_fake_video,
+    add_user,
+    make_client,
+    sign_in,
+    video_ids,
 )
+from promin.db import DB_NAME, Database
 
 
 def test_a_transaction_stores_everything_or_nothing(tmp_path):
@@ -139,10 +144,9 @@ def test_json_files_of_an_older_version_are_brought_over(tmp_path):
 
 
 def test_sessions_of_an_older_version_stay_logged_in(tmp_path):
+    from helpers import TOKEN
     from promin.auth import Auth
     from promin.crypto import hash_secret
-
-    from helpers import TOKEN
 
     auth = Auth(TOKEN, None, None, None)  # only the fingerprint of the built-in admin is needed
     old_files(tmp_path, sessions={"s1": {

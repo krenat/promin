@@ -7,11 +7,11 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from helpers import change_stored
 from helpers import (
     NEW_ENCODING,
     TOKEN,
     add_user,
+    change_stored,
     make_client,
     pair_key,
     pair_status,

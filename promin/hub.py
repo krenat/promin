@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from contextlib import suppress
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set, TypedDict
 
 from fastapi import WebSocket
 
@@ -17,13 +17,25 @@ WS_DISMISSED = 4001  # a phone disconnected the projector
 WS_UNAUTHORIZED = 4401
 
 
+class PlayerState(TypedDict):
+    """What the projector page last said about itself; the remotes show it."""
+
+    video_id: Optional[str]
+    name: Optional[str]
+    position: float
+    duration: float
+    volume: float
+    paused: bool
+    started: bool  # whether someone pressed the start button, which allows sound
+
+
 class Hub:
     """Connects remotes to the projector. State lives in the memory of one process."""
 
     def __init__(self) -> None:
         self.tv: Optional[WebSocket] = None
-        self.remotes: set = set()
-        self.state: Optional[Dict[str, Any]] = None
+        self.remotes: Set[WebSocket] = set()
+        self.state: Optional[PlayerState] = None
 
     @staticmethod
     async def send(ws: WebSocket, message: Dict[str, Any]) -> None:
@@ -35,7 +47,7 @@ class Hub:
             await self.send(ws, message)
 
 
-def clean_state(message: Dict[str, Any]) -> Dict[str, Any]:
+def clean_state(message: Dict[str, Any]) -> PlayerState:
     """State from the projector page: only known fields of known types."""
 
     def number(key: str) -> float:
