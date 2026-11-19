@@ -174,3 +174,29 @@ def test_old_password_hash_is_strengthened_at_login(client, viewer):
     assert stored["rounds"] == crypto.PBKDF2_ROUNDS and stored["hash"] != legacy_hash
     assert viewer.get("/api/me").status_code == 200  # still logged in elsewhere
     assert sign_in(TestClient(client.app, follow_redirects=False), "olena", VIEWER_PASSWORD).status_code == 303
+
+
+def test_a_wrong_password_costs_the_same_hashing_whoever_it_is_for(client, monkeypatch):
+    """The time a refused login takes must not tell an unknown name from a known one, nor a
+    password stored by an older version from one stored today."""
+    from promin import auth, crypto
+
+    assert add_user(client).status_code == 201
+    assert add_user(client, "taras").status_code == 201
+    change_stored(
+        client, "UPDATE users SET rounds = ? WHERE username = 'taras'",
+        crypto.LEGACY_PBKDF2_ROUNDS,
+    )
+    spent = []
+    real = auth.hash_password
+
+    def counted(password, salt, rounds):
+        spent.append(rounds)
+        return real(password, salt, rounds)
+
+    monkeypatch.setattr(auth, "hash_password", counted)
+    for username in ("nobody", "olena", "taras"):
+        del spent[:]
+        fresh = TestClient(client.app, follow_redirects=False)
+        assert sign_in(fresh, username, "wrong-password").status_code == 401
+        assert sum(spent) == crypto.PBKDF2_ROUNDS, username
