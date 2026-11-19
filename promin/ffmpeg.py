@@ -4,9 +4,10 @@ from __future__ import annotations
 import asyncio
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 from .encoding import Encoding
+from .library import VideoInfo
 
 # Codecs that need fewer bits than H.264 for the same picture: when transcoding from them,
 # the bitrate ceiling is the source bitrate with this headroom.
@@ -25,6 +26,16 @@ HDR_FILTER_SWSCALE = (
     "tonemap=tonemap=hable:desat=0,"
     "scale=out_transfer=bt709:out_color_matrix=bt709:out_range=tv"
 )
+
+
+class Plan(TypedDict):
+    """How much work a video needs, as plan_encode decided."""
+
+    mode: Literal["remux", "audio", "transcode"]
+    duration: float
+    fps: float
+    hdr: bool
+    max_rate_kbps: int
 
 
 class ProcessingError(Exception):
@@ -49,7 +60,7 @@ def stream_rotation(stream: Dict[str, Any]) -> int:
         return 0
 
 
-def plan_encode(probe: Dict[str, Any], encoding: Encoding) -> Dict[str, Any]:
+def plan_encode(probe: Dict[str, Any], encoding: Encoding) -> Plan:
     """Decides from the ffprobe output how much work is needed.
 
     remux: the file already fits, only repackage it;
@@ -96,10 +107,10 @@ def plan_encode(probe: Dict[str, Any], encoding: Encoding) -> Dict[str, Any]:
         and 0 < fps <= encoding.max_fps + 0.5
         and 0 < bitrate <= encoding.max_bitrate_kbps * 1000 * 1.25
     )
-    # Keep the audio as is if it is mono or stereo AAC.
     audio_ok = audio is None or (
         audio.get("codec_name") == "aac" and int(audio.get("channels") or 2) <= 2
     )
+    mode: Literal["remux", "audio", "transcode"]
     if video_ok and audio_ok:
         mode = "remux"
     elif video_ok:
@@ -121,7 +132,7 @@ def plan_encode(probe: Dict[str, Any], encoding: Encoding) -> Dict[str, Any]:
     }
 
 
-def video_info(probe: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def video_info(probe: Dict[str, Any]) -> Optional[VideoInfo]:
     """What the finished file is, for the card: frame size, frame rate, bitrate, codecs."""
     streams = probe.get("streams") or []
     video = next(
@@ -138,7 +149,7 @@ def video_info(probe: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     bitrate = 0.0
     for value in (video.get("bit_rate"), (probe.get("format") or {}).get("bit_rate")):
         try:
-            bitrate = float(value)
+            bitrate = float(value or "")
             break
         except (TypeError, ValueError):
             continue
@@ -162,7 +173,7 @@ def build_ffmpeg_args(
     ffmpeg: str,
     src: Path,
     dst: Path,
-    plan: Dict[str, Any],
+    plan: Plan,
     encoding: Encoding,
     hdr_filter: Optional[str],
 ) -> List[str]:
@@ -172,10 +183,9 @@ def build_ffmpeg_args(
     if plan["mode"] == "remux":
         args += ["-c", "copy"]
     elif plan["mode"] == "audio":
-        # The picture is copied losslessly; only the audio is re-encoded.
         args += ["-c:v", "copy", "-c:a", "aac", "-b:a", audio_rate, "-ac", "2"]
     else:
-        tonemapped = bool(plan["hdr"] and hdr_filter)
+        tone_map = hdr_filter if plan["hdr"] else None
         # Fit into the frame without upscaling; ffmpeg applies rotation by itself.
         filters = [
             "scale=w='min(%d,iw)':h='min(%d,ih)'"
@@ -183,8 +193,8 @@ def build_ffmpeg_args(
             % (encoding.max_width, encoding.max_height)
         ]
         # Tone mapping goes after downscaling: on 4K it is three times slower.
-        if tonemapped:
-            filters.append(hdr_filter)
+        if tone_map:
+            filters.append(tone_map)
         if plan["fps"] > encoding.max_fps + 0.5:
             filters.append("fps=%d" % encoding.max_fps)
         filters.append("format=yuv420p")
@@ -201,7 +211,7 @@ def build_ffmpeg_args(
             "-force_key_frames", "expr:gte(t,n_forced*2)",
             "-c:a", "aac", "-b:a", audio_rate, "-ac", "2",
         ]
-        if tonemapped:
+        if tone_map:
             args += ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"]
     # Strip metadata: phone videos often carry a location.
     args += ["-map_metadata", "-1", "-movflags", "+faststart"]

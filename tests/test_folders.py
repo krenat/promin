@@ -1,12 +1,9 @@
-"""Folders of the library."""
 from __future__ import annotations
-
-import json
 
 import pytest
 from fastapi.testclient import TestClient
 
-from helpers import add_fake_video, make_client, pair_key, pair_status, start_pairing
+from helpers import add_fake_video, count_commits, make_client, pair_key, pair_status, start_pairing
 
 
 def make_folder(client: TestClient, name: str) -> str:
@@ -68,8 +65,7 @@ def test_deleting_a_folder_keeps_its_videos(client, tmp_path):
     data = library(client)
     assert data["folders"] == []
     assert [(v["id"], v["folder"]) for v in data["videos"]] == [("aaa", None)]
-    stored = json.loads((tmp_path / "videos.json").read_text(encoding="utf-8"))
-    assert stored["aaa"]["folder"] is None
+    assert client.app.state.services.videos.get("aaa")["folder"] is None
 
 
 def test_upload_goes_into_the_folder_being_looked_at(client):
@@ -90,20 +86,6 @@ def test_folders_survive_restart(tmp_path):
         data = library(c)
         assert data["folders"] == [{"id": films, "name": "Фільми", "count": 1}]
         assert data["videos"][0]["folder"] == films
-
-
-def test_damaged_folders_file_does_not_stop_the_service(tmp_path):
-    with make_client(tmp_path) as c:
-        add_fake_video(c, tmp_path, "aaa")
-        films = make_folder(c, "Фільми")
-        c.post("/api/videos/aaa/folder", json={"folder": films})
-    (tmp_path / "folders.json").write_text("[1, 2]", encoding="utf-8")
-    with make_client(tmp_path) as c:
-        data = library(c)
-        # The video reads as having no folder, but keeps its folder id for when the file is fixed.
-        assert data["folders"] == [] and data["videos"][0]["folder"] is None
-    stored = json.loads((tmp_path / "videos.json").read_text(encoding="utf-8"))
-    assert stored["aaa"]["folder"] == films
 
 
 def test_folder_limit(client, monkeypatch):
@@ -129,16 +111,13 @@ def test_viewer_manages_folders_but_a_projector_does_not(client, viewer, project
     assert viewer.delete("/api/folders/" + films).status_code == 204
 
 
-def test_deleting_a_folder_writes_the_list_once(client, tmp_path, monkeypatch):
-    from promin import library as library_module
-
+def test_deleting_a_folder_is_stored_at_once(client, tmp_path):
+    """The folder goes and its videos are left without one in one transaction."""
     folder = make_folder(client, "Мультики")
     for i in range(10):
         add_fake_video(client, tmp_path, "v%02d" % i)
         client.post("/api/videos/v%02d/folder" % i, json={"folder": folder})
-    writes = []
-    real = library_module.write_json
-    monkeypatch.setattr(library_module, "write_json", lambda path, *a, **kw: (writes.append(path.name), real(path, *a, **kw)))
+    commits = count_commits(client)
     assert client.delete("/api/folders/" + folder).status_code == 204
-    assert writes.count("videos.json") == 1
+    assert len(commits) == 1
     assert all(v["folder"] is None for v in library(client)["videos"])

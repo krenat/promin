@@ -1,4 +1,3 @@
-"""Fixtures shared by the test files."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,6 +6,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from helpers import VIEWER_PASSWORD, add_user, make_client, make_clip, sign_in
+
+
+@pytest.fixture(autouse=True)
+def fast_password_hashing(monkeypatch):
+    """The real number of rounds takes a few tenths of a second per password, and the
+    tests hash hundreds. The legacy number stays below it, as in production."""
+    monkeypatch.setattr("promin.crypto.PBKDF2_ROUNDS", 2000)
+    monkeypatch.setattr("promin.crypto.LEGACY_PBKDF2_ROUNDS", 1000)
 
 
 @pytest.fixture(scope="session")

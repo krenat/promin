@@ -32,13 +32,17 @@ async def pair_start(request: Request, svc: Svc) -> Dict[str, Any]:
     if started is None:
         raise HTTPException(429, "Забагато пристроїв чекає на підключення.")
     # The phone opens this address from its camera, so it is the one the projector used.
-    url = "%spair?t=%s" % (request.base_url, started.pop("key"))
+    url = "%spair?t=%s" % (request.base_url, started["key"])
     picture = io.BytesIO()
     segno.make(url, error="m").save(
         picture, kind="svg", xmldecl=False, svgns=True, omitsize=True,
         scale=10, border=4, dark="#000", light="#fff",
     )
-    return dict(started, url=url, qr=picture.getvalue().decode("utf-8"))
+    # The key leaves only inside the address, which is what the QR code holds.
+    return {
+        "token": started["token"], "expires_in": started["expires_in"], "url": url,
+        "qr": picture.getvalue().decode("utf-8"),
+    }
 
 
 @router.post("/api/pair/status")

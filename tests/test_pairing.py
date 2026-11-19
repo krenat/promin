@@ -11,6 +11,7 @@ from helpers import (
     NEW_ENCODING,
     TOKEN,
     add_user,
+    change_stored,
     make_client,
     pair_key,
     pair_status,
@@ -109,27 +110,15 @@ def test_an_idle_projector_is_forgotten(client, projector):
     pairing = start_pairing(projector)
     client.post("/api/pair/approve", json=pair_key(pairing))
     assert pair_status(projector, pairing["token"]) == "approved"
-    devices = client.app.state.services.devices
     device_id = client.get("/api/devices").json()["devices"][0]["id"]
+    age = "UPDATE devices SET seen = seen - ? WHERE id = ?"
     # In touch within 30 days: the stamp is refreshed and the projector stays paired.
-    devices._devices[device_id]["seen"] -= 29 * 24 * 3600
+    change_stored(client, age, 29 * 24 * 3600, device_id)
     assert projector.get("/api/me").status_code == 200
     assert time.time() - client.get("/api/devices").json()["devices"][0]["seen"] < 60
     # Silent for longer: it is gone from the list without ever coming back.
-    devices._devices[device_id]["seen"] -= 31 * 24 * 3600
+    change_stored(client, age, 31 * 24 * 3600, device_id)
     assert client.get("/api/devices").json()["devices"] == []
-    assert projector.get("/api/me").status_code == 401
-
-
-def test_a_projector_paired_before_seen_was_recorded_counts_from_its_pairing(client, projector):
-    pairing = start_pairing(projector)
-    client.post("/api/pair/approve", json=pair_key(pairing))
-    pair_status(projector, pairing["token"])
-    devices = client.app.state.services.devices
-    device = next(iter(devices._devices.values()))
-    del device["seen"]
-    assert projector.get("/api/me").status_code == 200
-    device["created"] -= 31 * 24 * 3600
     assert projector.get("/api/me").status_code == 401
 
 
@@ -210,7 +199,8 @@ def test_devices_survive_restart(tmp_path):
         c.post("/api/pair/approve", json=pair_key(pairing))
         cookie = tv.post("/api/pair/status", json={"token": pairing["token"]}).cookies["promin_session"]
         # The device secret is not stored in the file as plain text.
-        assert cookie.split(".", 1)[1] not in (tmp_path / "devices.json").read_text(encoding="utf-8")
+        data = b"".join(path.read_bytes() for path in tmp_path.glob("promin.db*"))
+        assert cookie.split(".", 1)[1].encode() not in data
     with make_client(tmp_path, login=False) as c:
         c.cookies.set("promin_session", cookie)
         assert c.get("/api/me").json()["role"] == "device"

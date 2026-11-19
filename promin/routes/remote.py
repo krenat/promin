@@ -165,9 +165,12 @@ async def remote_command(svc: Services, message: Dict[str, Any]) -> str:
             return "Це відео недоступне"
         command.update(video_id=item["id"], name=item["name"])
     elif action in ("seek", "seek_by", "volume"):
+        value = message.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            return ""
         try:
-            command["value"] = float(message.get("value"))
-        except (TypeError, ValueError):
+            command["value"] = float(value)
+        except ValueError:
             return ""
     await hub.send(hub.tv, command)
     return ""

@@ -1,0 +1,36 @@
+# Settings of the checks that CI runs next to the tests: ruff (mistakes and style) and mypy
+# (types). To run them locally: `ruff check .` and `mypy`.
+
+[tool.ruff]
+line-length = 110
+# The code also runs on the Python that ships with macOS, which is older than the image's.
+target-version = "py39"
+
+[tool.ruff.lint]
+# E, W: style; F: mistakes pyflakes finds; I: import order; B: likely bugs;
+# UP: outdated syntax; SIM: needless complexity; ASYNC: blocking calls in async code.
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "ASYNC"]
+ignore = [
+    "UP031",   # "%d" % value formatting is used throughout, on purpose
+    "UP006", "UP007", "UP035", "UP045",  # typing.List and Optional: the 3.9 spelling
+    "B904",    # an HTTPException raised for a caught error needs no "from"
+    "SIM105",  # try/except/pass and suppress() are both used where each reads better
+    "SIM117",  # nested "with" keeps the lines of the tests short
+]
+
+[tool.ruff.lint.per-file-ignores]
+# A test often reads best as one long line: a request and what is expected of it.
+"tests/*" = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["promin", "helpers"]
+
+[tool.mypy]
+files = ["promin", "main.py"]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["segno"]
+ignore_missing_imports = true

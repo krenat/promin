@@ -10,12 +10,12 @@ Upload a video from your phone, the server transcodes it into a format the proje
 
 The interface is in Ukrainian.
 
-**Status:** in development. Users with roles, upload, transcoding with ffmpeg, the video list, playback in the browser, deletion and the projector remote already work. The service runs over plain HTTP without encryption, so do not type passwords on networks you do not trust.
+**Status:** in development; everything listed below works. The service runs over plain HTTP without encryption, so do not type passwords on networks you do not trust.
 
 ## Features
 
 - upload videos from a phone through the browser;
-- automatic transcoding with ffmpeg to 1080p H.264;
+- automatic transcoding with ffmpeg to H.264, 1080p unless the settings say otherwise;
 - a `/tv` page for the projector's browser and a `/` page for the phone;
 - playback on the projector controlled from the phone over WebSocket;
 - folders, one level deep;
@@ -28,33 +28,15 @@ Python 3.12, FastAPI, Uvicorn, ffmpeg, Docker.
 
 ## Code layout
 
-`main.py` only starts the server; the code is in the `promin` package.
-
-| Module | What is in it |
-|---|---|
-| `config` | settings from the environment, paths |
-| `jsonfile` | the data files: atomic writes, recovery of a damaged file |
-| `library` | the video list, folders and the watch queue, each in its data file |
-| `encoding` | the encoding settings |
-| `ffmpeg`, `transcode` | the plan and the ffmpeg commands; the worker that runs them |
-| `upload` | what may be uploaded, and writing it to disk |
-| `accounts`, `devices` | users and their sessions; paired projectors |
-| `auth`, `crypto` | who is asking, by the cookie; the login limit; hashing |
-| `hub` | the live connections of the projector page and the phones |
-| `playback` | the watch queue as phones see it, and what the projector plays next |
-| `tvtest` | the projector check |
-| `services` | all of the above for one running app, and what spans several of them |
-| `assets` | serving `static/` under a version, so browsers do not mix old and new files |
-| `routes/` | the pages and the API, one module per subject |
-| `templates/` | the pages: markup only |
-| `static/` | the logo, and the styles (`css/`) and scripts (`js/`) of each page |
-| `app` | `create_app`, which puts it together |
+`main.py` only starts the server; the code is in the `promin` package. The pages and the API are in `routes/`, one module per subject, the pages' markup in `templates/`, their styles and scripts in `static/`.
 
 Every route names who may call it (`AUTH`, `MEMBER` or `ADMIN` from `routes/deps.py`); a test fails if one is left open by accident.
 
 Pages name their styles and scripts under a version (`/static/v-<version>/...`) that changes whenever a file in `static/` does, so a browser never runs an old script against a new page.
 
-The scripts are plain JavaScript without a build step. The phone page's script is split into ES modules in `static/js/index/` (`main.js` starts it; the shared state is in `state.js`). `api.js` is the one way every page calls the server. With Node.js installed, the tests also load every module script in it; without it those tests are skipped. `tv.js` stays one file without newer language features, because the projector's browser may be old.
+The scripts are plain JavaScript without a build step. The phone page's script is split into ES modules in `static/js/index/` (`main.js` starts it; the shared state is in `state.js`). `api.js` is the one way every page calls the server. `tv.js` stays one file without newer language features, because the projector's browser may be old; a test fails if one slips in.
+
+With Node.js installed, the tests also load every module script in it and run the projector page in a stand-in browser (`tests/tv_page.mjs`): time, the network and the `<video>` element are moved by hand, and `tests/tv_page.test.mjs` checks what the page does with the remote's commands, playback errors, a dropped connection, pairing and the projector check. Without Node.js those tests are skipped.
 
 The tests follow the same subjects: `tests/test_<subject>.py`, with the shared fixtures in `conftest.py` and the shared steps in `helpers.py`.
 
@@ -68,7 +50,17 @@ python3 -m venv .venv
 PROMIN_TOKEN=local-dev-token-123 .venv/bin/python main.py
 ```
 
-The page opens at `http://localhost:8080`; the login is `admin` and the password is the value of `PROMIN_TOKEN`. Tests: `.venv/bin/python -m pytest`. GitHub Actions runs them on every pull request with the pinned versions.
+The page opens at `http://localhost:8080`; the login is `admin` and the password is the value of `PROMIN_TOKEN`.
+
+The checks, all three run by GitHub Actions on every pull request with the pinned versions:
+
+```bash
+.venv/bin/python -m pytest   # the tests
+.venv/bin/ruff check .       # mistakes and style
+.venv/bin/mypy               # types, in strict mode
+```
+
+What a video, a user, a session or the state of the projector consists of is written down as a type next to the store that keeps it (`Video` in `library`, `Principal` in `auth`, `PlayerState` in `hub`, and so on), so a mistyped field name fails the type check instead of a request.
 
 ## Running on a server with Docker
 
@@ -79,7 +71,8 @@ cp .env.example .env   # set PROMIN_TOKEN and PROMIN_PORT
 docker compose up -d --build
 ```
 
-- The service listens on `PROMIN_PORT`; data lives in the `promin-data` volume.
+- The service listens on `PROMIN_PORT`; data lives in the `promin-data` volume: the video files, and `promin.db` (SQLite) with everything else. Every start keeps a copy of the database as `promin.db.bak`; a database that cannot be read is moved aside as `promin.db.broken-<time>` and the copy is used.
+- A version that kept its data in JSON files (`videos.json`, `users.json` and the others) is brought over by itself on the first start: the files are read into the database once and renamed to `.imported`.
 - Logs: `docker compose logs -f`.
 - Updating: `git pull && docker compose up -d --build`. With the old `docker-compose` 1.29 this command fails with `KeyError: 'ContainerConfig'`; use `docker-compose build && docker-compose down && docker-compose up -d` instead (without `-v`, so the volume with the videos is not deleted).
 - The container does not run as root and is limited to `PROMIN_CPUS` cores.
@@ -140,7 +133,7 @@ The same page has a "check the projector" button that shows which of these setti
 ## Users and roles
 
 - The built-in administrator has the login `admin`; its password is the value of `PROMIN_TOKEN`.
-- The administrator adds other users on the `/users` page. Their passwords are stored in the data volume only as hashes.
+- The administrator adds other users on the `/users` page. Their passwords are stored in the data volume only as hashes (PBKDF2, 600,000 rounds; a password stored by an older version with fewer is hashed again the next time its owner logs in).
 - A **viewer** watches, uploads and deletes videos, changes the encoding settings and controls the projector. An **administrator** can do all of that, also deletes several videos at once, and manages users and paired projectors.
 - The video library is shared by everyone.
 - Changing a password or deleting a user ends that user's sessions; changing `PROMIN_TOKEN` ends everyone's sessions.

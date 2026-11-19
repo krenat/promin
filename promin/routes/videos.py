@@ -35,13 +35,15 @@ async def index() -> Response:
 @router.get("/api/videos", dependencies=AUTH)
 async def list_videos(svc: Svc) -> Dict[str, Any]:
     usage = shutil.disk_usage(svc.settings.data_dir)
-    videos = [svc.video_view(item) for item in svc.videos.list()]
+    folders = svc.folders.list()
+    known = {folder["id"] for folder in folders}
+    videos = [svc.video_view(item, known) for item in svc.videos.list()]
     counts: Dict[Optional[str], int] = {}
     for video in videos:
         counts[video["folder"]] = counts.get(video["folder"], 0) + 1
     return {
         "videos": videos,
-        "folders": [dict(f, count=counts.get(f["id"], 0)) for f in svc.folders.list()],
+        "folders": [dict(f, count=counts.get(f["id"], 0)) for f in folders],
         "disk": {"free": usage.free, "total": usage.total},
         "max_upload": svc.settings.max_upload_bytes,
     }
@@ -80,7 +82,8 @@ async def retry_video(video_id: str, svc: Svc) -> Dict[str, Any]:
         raise HTTPException(404, "Відео не знайдено")
     if item["status"] != "error":
         raise HTTPException(409, "Повторити можна лише відео з помилкою")
-    if not item.get("source") or not (svc.settings.uploads_dir / item["source"]).is_file():
+    source = item["source"]
+    if not source or not (svc.settings.uploads_dir / source).is_file():
         raise HTTPException(409, "Оригінал не зберігся, завантажте відео ще раз")
     svc.videos.update(video_id, status="queued", error=None)
     svc.transcoder.enqueue(video_id)
@@ -110,9 +113,8 @@ async def thumb(video_id: str, svc: Svc) -> FileResponse:
 
 @router.delete("/api/videos/{video_id}", status_code=204, dependencies=MEMBER)
 async def delete_video(video_id: str, svc: Svc) -> Response:
-    if not svc.delete_videos([video_id]):
+    if not await svc.delete_videos([video_id]):
         raise HTTPException(404, "Відео не знайдено")
-    await svc.playback.forget_videos({video_id})
     return Response(status_code=204)
 
 
@@ -124,7 +126,6 @@ async def delete_videos(body: VideoIds, svc: Svc) -> Dict[str, Any]:
         raise HTTPException(400, "Не вибрано жодного відео")
     if len(ids) > BATCH_DELETE_MAX:
         raise HTTPException(400, "За раз можна видалити щонайбільше %d відео" % BATCH_DELETE_MAX)
-    deleted = svc.delete_videos(ids)
+    deleted = await svc.delete_videos(ids)
     gone = set(deleted)
-    await svc.playback.forget_videos(gone)
     return {"deleted": deleted, "missing": [i for i in ids if i not in gone]}

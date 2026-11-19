@@ -5,7 +5,6 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-# The pages and the logo are part of the package.
 PACKAGE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = PACKAGE_DIR / "templates"
 STATIC_DIR = PACKAGE_DIR / "static"
@@ -26,7 +25,7 @@ class Settings:
     x264_preset: str = "veryfast"
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         env = os.environ
         return cls(
             data_dir=Path(env.get("PROMIN_DATA_DIR", "./data")).resolve(),

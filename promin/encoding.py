@@ -1,12 +1,10 @@
 """How new videos are encoded: the choices of the settings page and where they are kept."""
 from __future__ import annotations
 
-import threading
 from dataclasses import asdict, dataclass
-from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
-from .jsonfile import read_json, write_json
+from .db import Database
 
 # What the administrator may choose on the settings page. The frame is 16:9.
 HEIGHTS = {720: 1280, 1080: 1920, 1440: 2560, 2160: 3840}  # height → width
@@ -55,28 +53,28 @@ class Encoding:
 class EncodingStore:
     """Encoding chosen on the settings page; until then, the defaults from the environment."""
 
-    def __init__(self, path: Path, defaults: Encoding) -> None:
-        self.path = path
+    KEY = "encoding"
+
+    def __init__(self, db: Database, defaults: Encoding) -> None:
+        self.db = db
         self.defaults = defaults
-        self._lock = threading.Lock()
         self._current = defaults
 
     def load(self) -> None:
-        def check(saved: Any) -> Encoding:
-            merged = Encoding(**{**asdict(self.defaults), **dict(saved)})
-            if merged.problem():
-                raise ValueError(merged.problem())
-            return merged
-
-        with self._lock:
-            # A damaged or outdated file must not stop the service: fall back to the defaults.
-            self._current = read_json(self.path, check) or self.defaults
+        # Stored values that no longer fit must not stop the service: fall back to the
+        # defaults.
+        self._current = self.defaults
+        try:
+            merged = Encoding(**{**asdict(self.defaults), **dict(self.db.get_setting(self.KEY))})
+            # A value of the wrong type fails here, when it is compared with the limits.
+            if not merged.problem():
+                self._current = merged
+        except (ValueError, TypeError):
+            pass
 
     def get(self) -> Encoding:
-        with self._lock:
-            return self._current
+        return self._current
 
     def set(self, encoding: Encoding) -> None:
-        with self._lock:
-            write_json(self.path, asdict(encoding))
-            self._current = encoding
+        self.db.set_setting(self.KEY, asdict(encoding))
+        self._current = encoding

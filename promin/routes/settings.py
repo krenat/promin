@@ -9,8 +9,15 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from ..encoding import (
-    AUDIO_BITRATES_KBPS, BITRATE_RANGE_KBPS, CRF_RANGE, FPS_CHOICES, HEIGHTS, SUGGESTED_KBPS,
-    X264_PRESETS, Encoding, EncodingStore,
+    AUDIO_BITRATES_KBPS,
+    BITRATE_RANGE_KBPS,
+    CRF_RANGE,
+    FPS_CHOICES,
+    HEIGHTS,
+    SUGGESTED_KBPS,
+    X264_PRESETS,
+    Encoding,
+    EncodingStore,
 )
 from .deps import AUTH, MEMBER, Svc, User, page
 

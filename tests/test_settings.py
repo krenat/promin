@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from helpers import NEW_ENCODING, make_client, needs_ffmpeg, probe_video, upload, wait_done
+from helpers import NEW_ENCODING, change_stored, make_client, needs_ffmpeg, probe_video, upload, wait_done
 
 
 def test_settings_default_to_the_environment(tmp_path):
@@ -51,11 +51,13 @@ def test_every_user_reaches_settings(client, viewer, anon):
     assert anon.get("/settings").status_code == 303
 
 
-def test_damaged_settings_file_falls_back_to_defaults(tmp_path):
-    (tmp_path / "encoding.json").write_text('{"max_height": 999}', encoding="utf-8")
+def test_stored_settings_that_no_longer_fit_fall_back_to_defaults(tmp_path):
+    with make_client(tmp_path) as c:
+        assert c.put("/api/settings", json=NEW_ENCODING).status_code == 200
+        change_stored(c, "UPDATE settings SET value = ? WHERE key = 'encoding'", '{"max_height": 999}')
     with make_client(tmp_path) as c:
         assert c.get("/api/settings").json()["encoding"]["max_height"] == 1080
-    (tmp_path / "encoding.json").write_text("not json", encoding="utf-8")
+        change_stored(c, "UPDATE settings SET value = 'not json' WHERE key = 'encoding'")
     with make_client(tmp_path) as c:
         assert c.get("/api/settings").json()["encoding"]["max_height"] == 1080
 

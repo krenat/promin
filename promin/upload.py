@@ -6,12 +6,12 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import AsyncIterator, Optional
 
 import anyio
 
 from .config import Settings
-from .library import ALLOWED_EXT
+from .library import ALLOWED_EXT, Video
 
 
 class UploadError(Exception):
@@ -49,7 +49,7 @@ def check_upload(settings: Settings, name: str, content_length: Optional[str]) -
 async def receive_upload(
     settings: Settings, chunks: AsyncIterator[bytes], name: str, length: int,
     folder: Optional[str],
-) -> Dict[str, Any]:
+) -> Video:
     """Writes the upload to disk and returns the record of the new video, ready to be queued.
 
     An upload that breaks off or does not match its declared size leaves no file behind.
@@ -81,6 +81,8 @@ async def receive_upload(
         "source": source,
         "duration": None,
         "thumb": False,
+        "thumb_v": None,
         "error": None,
         "folder": folder,
+        "info": None,
     }

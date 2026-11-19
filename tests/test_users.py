@@ -4,7 +4,16 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from helpers import VIEWER_PASSWORD, add_user, make_client, needs_ffmpeg, sign_in, upload, wait_done
+from helpers import (
+    VIEWER_PASSWORD,
+    add_user,
+    change_stored,
+    count_commits,
+    needs_ffmpeg,
+    sign_in,
+    upload,
+    wait_done,
+)
 
 
 def test_me_reports_role(client, viewer):
@@ -16,8 +25,6 @@ def test_admin_manages_users(client, tmp_path):
     assert add_user(client).status_code == 201
     names = [u["username"] for u in client.get("/api/users").json()["users"]]
     assert names == ["admin", "olena"]
-    # The password is not stored in the file as plain text.
-    assert VIEWER_PASSWORD not in (tmp_path / "users.json").read_text(encoding="utf-8")
 
     assert client.delete("/api/users/olena").status_code == 204
     assert client.delete("/api/users/olena").status_code == 404
@@ -135,9 +142,61 @@ def test_logout_clears_session(client):
     assert c.get("/api/me").status_code == 401
 
 
-def test_users_survive_restart(tmp_path):
-    with make_client(tmp_path) as c:
-        assert add_user(c).status_code == 201
-    with make_client(tmp_path, login=False) as c:
-        c.follow_redirects = False
-        assert sign_in(c, "olena", VIEWER_PASSWORD).status_code == 303
+def test_old_password_hash_is_strengthened_at_login(client, viewer):
+    """A password stored with the old number of rounds still logs in, is stored again with
+    today's number, and the phone that was already logged in stays logged in."""
+    from promin import crypto
+
+    services = client.app.state.services
+    users = services.users
+    old = users.get("olena")
+    legacy_hash = crypto.hash_password(
+        VIEWER_PASSWORD, bytes.fromhex(old["salt"]), crypto.LEGACY_PBKDF2_ROUNDS
+    )
+    # As the older version left it, with the phone logged in under that hash.
+    before = services.auth.fingerprint("olena")
+    change_stored(
+        client, "UPDATE users SET hash = ?, rounds = ? WHERE username = 'olena'",
+        legacy_hash, crypto.LEGACY_PBKDF2_ROUNDS,
+    )
+    services.sessions.refingerprint("olena", before, services.auth.fingerprint("olena"))
+    assert viewer.get("/api/me").status_code == 200
+
+    other = TestClient(client.app, follow_redirects=False)
+    assert sign_in(other, "olena", "wrong-password").status_code == 401
+    assert users.get("olena")["hash"] == legacy_hash  # a wrong password changes nothing
+
+    commits = count_commits(client)
+    assert sign_in(other, "olena", VIEWER_PASSWORD).status_code == 303
+    # The new hash and the sessions that depend on it are stored together; then the login.
+    assert len(commits) == 2
+    stored = users.get("olena")
+    assert stored["rounds"] == crypto.PBKDF2_ROUNDS and stored["hash"] != legacy_hash
+    assert viewer.get("/api/me").status_code == 200  # still logged in elsewhere
+    assert sign_in(TestClient(client.app, follow_redirects=False), "olena", VIEWER_PASSWORD).status_code == 303
+
+
+def test_a_wrong_password_costs_the_same_hashing_whoever_it_is_for(client, monkeypatch):
+    """The time a refused login takes must not tell an unknown name from a known one, nor a
+    password stored by an older version from one stored today."""
+    from promin import auth, crypto
+
+    assert add_user(client).status_code == 201
+    assert add_user(client, "taras").status_code == 201
+    change_stored(
+        client, "UPDATE users SET rounds = ? WHERE username = 'taras'",
+        crypto.LEGACY_PBKDF2_ROUNDS,
+    )
+    spent = []
+    real = auth.hash_password
+
+    def counted(password, salt, rounds):
+        spent.append(rounds)
+        return real(password, salt, rounds)
+
+    monkeypatch.setattr(auth, "hash_password", counted)
+    for username in ("nobody", "olena", "taras"):
+        del spent[:]
+        fresh = TestClient(client.app, follow_redirects=False)
+        assert sign_in(fresh, username, "wrong-password").status_code == 401
+        assert sum(spent) == crypto.PBKDF2_ROUNDS, username

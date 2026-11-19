@@ -1,5 +1,3 @@
-// Uploading a video from the phone.
-
 import { folderById } from './folders.js';
 import { refresh } from './library.js';
 import { state } from './state.js';

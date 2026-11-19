@@ -7,7 +7,8 @@ a QR code from its screen that is scanned and approved on the phone.
 Where things are:
 
 - config: settings from the environment and the paths of the project;
-- jsonfile: the data files every store reads and writes;
+- db: the SQLite database every store reads and writes;
+- legacy: bringing over the JSON files of older versions;
 - upload: what may be uploaded, and writing it to disk;
 - library: the video list, the folders and the watch queue;
 - encoding: the encoding settings;

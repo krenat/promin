@@ -4,10 +4,11 @@ from __future__ import annotations
 import asyncio
 import hmac
 import time
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Literal, Optional, TypedDict
 
 from starlette.requests import HTTPConnection
 
+from . import crypto
 from .accounts import BUILTIN_ADMIN, SESSION_IDLE_TTL, SessionStore, UserStore
 from .crypto import hash_password, hash_secret, same
 from .devices import DEVICE_IDLE_TTL, DeviceStore
@@ -21,6 +22,18 @@ SESSION_TOUCH_EVERY = 24 * 3600  # how often to record that a session was used
 LOGIN_MAX_FAILURES = 5
 LOGIN_WINDOW_SECONDS = 15 * 60
 LIMITER_MAX_ADDRESSES = 5000  # past this many, addresses with no recent failures are forgotten
+
+
+class _Principal(TypedDict):
+    username: str
+    # "device" is a paired projector: it has no login and may only show videos.
+    role: Literal["admin", "viewer", "device"]
+
+
+class Principal(_Principal, total=False):
+    """Who is asking, as the cookie tells."""
+
+    device_id: str  # only for a paired projector
 
 
 class NotAuthenticated(Exception):
@@ -91,7 +104,7 @@ class Auth:
         message = (username + "|" + source).encode("utf-8")
         return hmac.new(self._secret, message, "sha256").hexdigest()
 
-    def current_user(self, conn: HTTPConnection) -> Optional[Dict[str, Any]]:
+    def current_user(self, conn: HTTPConnection) -> Optional[Principal]:
         raw = conn.cookies.get(COOKIE_NAME, "")
         if raw.startswith("@"):  # a paired projector
             device_id, _, secret = raw[1:].partition(".")
@@ -99,7 +112,7 @@ class Auth:
             digest = hash_secret(secret)
             if device is None or not same(digest, device["hash"]):
                 return None
-            idle = time.time() - self.devices.seen(device)
+            idle = time.time() - device["seen"]
             if idle > DEVICE_IDLE_TTL:
                 self.devices.remove(device_id)
                 return None
@@ -119,8 +132,12 @@ class Auth:
             return None
         if idle > SESSION_TOUCH_EVERY:
             self.sessions.touch(session_id)
-        role = "admin" if username == BUILTIN_ADMIN else (self.users.get(username) or {}).get("role")
-        return {"username": username, "role": role}
+        if username == BUILTIN_ADMIN:
+            return {"username": username, "role": "admin"}
+        user = self.users.get(username)
+        if user is None:  # deleted a moment ago
+            return None
+        return {"username": username, "role": user["role"]}
 
     async def check_password(self, username: str, password: str) -> bool:
         if username == BUILTIN_ADMIN:
@@ -128,8 +145,34 @@ class Auth:
         user = self.users.get(username)
         # Hash for an unknown name too, so the response does not reveal whether it exists.
         salt = bytes.fromhex(user["salt"]) if user else b"\0" * 16
-        digest = await asyncio.to_thread(hash_password, password, salt)
-        return user is not None and same(digest, user["hash"])
+        rounds = user["rounds"] if user else crypto.PBKDF2_ROUNDS
+        digest = await asyncio.to_thread(hash_password, password, salt, rounds)
+        if user is None or not same(digest, user["hash"]):
+            if rounds < crypto.PBKDF2_ROUNDS:
+                # A wrong password takes as long for an old hash as for today's and for
+                # an unknown name, so the time does not tell them apart.
+                await asyncio.to_thread(
+                    hash_password, password, salt, crypto.PBKDF2_ROUNDS - rounds
+                )
+            return False
+        if rounds < crypto.PBKDF2_ROUNDS:
+            await asyncio.to_thread(self._strengthen, username, password, user["hash"])
+        return True
+
+    def _strengthen(self, username: str, password: str, old_hash: str) -> None:
+        """Stores a password that was just checked under today's number of rounds. Only a
+        login can do this: the password itself is never kept. Sessions that are open on
+        other phones stay open."""
+        hashed = self.users.hashed(password)
+        # The hash and the sessions that depend on it change together: a request from
+        # another phone never finds its session made for a hash that is gone.
+        with self.users.db.transaction():
+            before = self.fingerprint(username)
+            if not self.users.set_hash(username, hashed, only_if_hash=old_hash):
+                return
+            after = self.fingerprint(username)
+            if before and after:
+                self.sessions.refingerprint(username, before, after)
 
     def login(self, username: str) -> str:
         """Starts a session for a user whose password was checked; returns the cookie value."""

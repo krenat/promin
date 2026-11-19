@@ -1,11 +1,8 @@
-"""The projector check."""
 from __future__ import annotations
 
 import time
 
 from fastapi.testclient import TestClient
-
-from promin.tvtest import clean_tvtest_report, tvtest_fits, tvtest_levels
 
 from helpers import (
     make_client,
@@ -16,6 +13,7 @@ from helpers import (
     start_pairing,
     tv_state,
 )
+from promin.tvtest import clean_tvtest_report, tvtest_fits, tvtest_levels
 
 
 def played(clip_id: str, advance: float = 1.0, frames: int = 180, dropped: int = 0) -> dict:

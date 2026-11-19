@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI
 
@@ -24,7 +24,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     svc = Services.create(settings)
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         for folder in (settings.uploads_dir, settings.videos_dir, settings.thumbs_dir):
             folder.mkdir(parents=True, exist_ok=True)
         # Half-written files are useless after a restart.
@@ -40,6 +40,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             with suppress(asyncio.CancelledError):
                 await svc.tvtest.task
         await svc.transcoder.stop()
+        svc.close()
 
     app = FastAPI(title="Promin", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.services = svc

@@ -1,18 +1,18 @@
-"""People with a login: users and their sessions, each in a data file."""
+"""People with a login: users and their sessions."""
 from __future__ import annotations
 
 import re
 import secrets
-import threading
 import time
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Literal, Optional, Tuple, TypedDict
 
+from . import crypto
 from .crypto import hash_password, hash_secret
-from .jsonfile import read_json, records, write_json
+from .db import Database
 
-# Built-in administrator: its password is PROMIN_TOKEN and is never stored in a file.
+# Built-in administrator: its password is PROMIN_TOKEN and is never stored.
 BUILTIN_ADMIN = "admin"
+Role = Literal["admin", "viewer"]
 ROLES = ("admin", "viewer")
 USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,31}$")
 MIN_PASSWORD_LENGTH = 8
@@ -21,113 +21,127 @@ MIN_PASSWORD_LENGTH = 8
 SESSION_IDLE_TTL = 30 * 24 * 3600
 
 
+class UserRecord(TypedDict):
+    """A user as stored: the password only as a hash, with what it takes to check it."""
+
+    role: Role
+    salt: str
+    hash: str
+    rounds: int
+    created: float
+
+
+class UserSummary(TypedDict):
+    username: str
+    role: Role
+    created: float
+
+
+class Session(TypedDict):
+    username: str
+    hash: str
+    fingerprint: str
+    created: float
+    seen: float
+
+
 class UserStore:
-    """Users in a JSON file; passwords are stored only as hashes."""
+    """Users; passwords are stored only as hashes."""
 
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._lock = threading.Lock()
-        self._users: Dict[str, Dict[str, Any]] = {}
+    def __init__(self, db: Database) -> None:
+        self.db = db
 
-    def load(self) -> None:
-        with self._lock:
-            self._users = read_json(self.path, records("role", "salt", "hash", "created")) or {}
+    def list(self) -> List[UserSummary]:
+        return [
+            UserSummary(username=row["username"], role=row["role"], created=row["created"])
+            for row in self.db.all("SELECT username, role, created FROM users ORDER BY username")
+        ]
 
-    def _save(self) -> None:
-        write_json(self.path, self._users, private=True)
+    def get(self, username: str) -> Optional[UserRecord]:
+        row = self.db.one("SELECT * FROM users WHERE username = ?", (username,))
+        if row is None:
+            return None
+        return UserRecord(
+            role=row["role"], salt=row["salt"], hash=row["hash"], rounds=row["rounds"],
+            created=row["created"],
+        )
 
-    def list(self) -> List[Dict[str, Any]]:
-        with self._lock:
-            return [
-                {"username": name, "role": user["role"], "created": user["created"]}
-                for name, user in sorted(self._users.items())
-            ]
+    def add(self, username: str, password: str, role: Role) -> bool:
+        """False if the name is taken."""
+        salt, digest, rounds = self.hashed(password)
+        return self.db.run(
+            "INSERT OR IGNORE INTO users (username, role, salt, hash, rounds, created)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (username, role, salt, digest, rounds, time.time()),
+        ) > 0
 
-    def get(self, username: str) -> Optional[Dict[str, Any]]:
-        with self._lock:
-            user = self._users.get(username)
-            return dict(user) if user else None
-
-    def add(self, username: str, password: str, role: str) -> bool:
+    @staticmethod
+    def hashed(password: str) -> Tuple[str, str, int]:
+        """A password as it is stored: the salt, the hash and its rounds. Slow on purpose,
+        so it is worked out before the database is touched, never inside a transaction."""
         salt = secrets.token_bytes(16)
-        digest = hash_password(password, salt)
-        with self._lock:
-            if username in self._users:
-                return False
-            self._users[username] = {
-                "role": role, "salt": salt.hex(), "hash": digest, "created": time.time(),
-            }
-            self._save()
-            return True
+        rounds = crypto.PBKDF2_ROUNDS
+        return salt.hex(), hash_password(password, salt, rounds), rounds
 
-    def set_password(self, username: str, password: str) -> bool:
-        salt = secrets.token_bytes(16)
-        digest = hash_password(password, salt)
-        with self._lock:
-            if username not in self._users:
-                return False
-            self._users[username].update(salt=salt.hex(), hash=digest)
-            self._save()
-            return True
+    def set_password(self, username: str, password: str, only_if_hash: Optional[str] = None) -> bool:
+        """Stores a new hash of the password. With `only_if_hash`, only while the user still
+        has that hash: a password changed in the meantime is left alone."""
+        return self.set_hash(username, self.hashed(password), only_if_hash)
+
+    def set_hash(
+        self, username: str, hashed: Tuple[str, str, int], only_if_hash: Optional[str] = None
+    ) -> bool:
+        salt, digest, rounds = hashed
+        sql = "UPDATE users SET salt = ?, hash = ?, rounds = ? WHERE username = ?"
+        params: List[Any] = [salt, digest, rounds, username]
+        if only_if_hash is not None:
+            sql += " AND hash = ?"
+            params.append(only_if_hash)
+        return self.db.run(sql, params) > 0
 
     def remove(self, username: str) -> bool:
-        with self._lock:
-            if username not in self._users:
-                return False
-            del self._users[username]
-            self._save()
-            return True
+        return self.db.run("DELETE FROM users WHERE username = ?", (username,)) > 0
 
 
 class SessionStore:
     """User sessions. Only a hash of the cookie secret is stored."""
 
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._lock = threading.Lock()
-        self._sessions: Dict[str, Dict[str, Any]] = {}
-
-    def load(self) -> None:
-        with self._lock:
-            check = records("username", "hash", "fingerprint", "seen")
-            self._sessions = read_json(self.path, check) or {}
-
-    def _save(self) -> None:
-        write_json(self.path, self._sessions, private=True)
+    def __init__(self, db: Database) -> None:
+        self.db = db
 
     def add(self, username: str, fingerprint: str) -> str:
         """Creates a session and returns its cookie value. Also purges expired ones."""
         session_id = secrets.token_hex(8)
         secret = secrets.token_urlsafe(32)
         now = time.time()
-        with self._lock:
-            for key in [k for k, v in self._sessions.items() if v["seen"] < now - SESSION_IDLE_TTL]:
-                del self._sessions[key]
-            self._sessions[session_id] = {
-                "username": username,
-                "hash": hash_secret(secret),
-                "fingerprint": fingerprint,
-                "created": now,
-                "seen": now,
-            }
-            self._save()
+        with self.db.transaction() as conn:
+            conn.execute("DELETE FROM sessions WHERE seen < ?", (now - SESSION_IDLE_TTL,))
+            conn.execute(
+                "INSERT INTO sessions (id, username, hash, fingerprint, created, seen)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, username, hash_secret(secret), fingerprint, now, now),
+            )
         return "%s.%s" % (session_id, secret)
 
-    def get(self, session_id: str) -> Optional[Dict[str, Any]]:
-        with self._lock:
-            session = self._sessions.get(session_id)
-            return dict(session) if session else None
+    def get(self, session_id: str) -> Optional[Session]:
+        row = self.db.one("SELECT * FROM sessions WHERE id = ?", (session_id,))
+        if row is None:
+            return None
+        return Session(
+            username=row["username"], hash=row["hash"], fingerprint=row["fingerprint"],
+            created=row["created"], seen=row["seen"],
+        )
 
     def touch(self, session_id: str) -> None:
-        with self._lock:
-            if session_id in self._sessions:
-                self._sessions[session_id]["seen"] = time.time()
-                self._save()
+        self.db.run("UPDATE sessions SET seen = ? WHERE id = ?", (time.time(), session_id))
+
+    def refingerprint(self, username: str, old: str, new: str) -> None:
+        """Moves the sessions of a user from one fingerprint to another, so that storing
+        the same password under a stronger hash does not log anyone out."""
+        self.db.run(
+            "UPDATE sessions SET fingerprint = ? WHERE username = ? AND fingerprint = ?",
+            (new, username, old),
+        )
 
     def remove(self, session_id: str) -> bool:
-        with self._lock:
-            if session_id not in self._sessions:
-                return False
-            del self._sessions[session_id]
-            self._save()
-            return True
+        return self.db.run("DELETE FROM sessions WHERE id = ?", (session_id,)) > 0

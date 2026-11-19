@@ -1,4 +1,3 @@
-"""The shared watch queue of the projector."""
 from __future__ import annotations
 
 from typing import Any, Dict
