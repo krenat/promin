@@ -10,12 +10,12 @@ Upload a video from your phone, the server transcodes it into a format the proje
 
 The interface is in Ukrainian.
 
-**Status:** in development. Users with roles, upload, transcoding with ffmpeg, the video list, playback in the browser, deletion and the projector remote already work. The service runs over plain HTTP without encryption, so do not type passwords on networks you do not trust.
+**Status:** in development; everything listed below works. The service runs over plain HTTP without encryption, so do not type passwords on networks you do not trust.
 
 ## Features
 
 - upload videos from a phone through the browser;
-- automatic transcoding with ffmpeg to 1080p H.264;
+- automatic transcoding with ffmpeg to H.264, 1080p unless the settings say otherwise;
 - a `/tv` page for the projector's browser and a `/` page for the phone;
 - playback on the projector controlled from the phone over WebSocket;
 - folders, one level deep;
@@ -39,6 +39,7 @@ Python 3.12, FastAPI, Uvicorn, ffmpeg, Docker.
 | `encoding` | the encoding settings |
 | `ffmpeg`, `transcode` | the plan and the ffmpeg commands; the worker that runs them |
 | `upload` | what may be uploaded, and writing it to disk |
+| `parsing` | reading values a page sends, which may be anything |
 | `accounts`, `devices` | users and their sessions; paired projectors |
 | `auth`, `crypto` | who is asking, by the cookie; the login limit; hashing |
 | `hub` | the live connections of the projector page and the phones |
