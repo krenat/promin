@@ -10,6 +10,7 @@ from helpers import (
     TOKEN,
     VIEWER_PASSWORD,
     add_user,
+    another,
     change_stored,
     make_client,
     pair_key,
@@ -84,7 +85,7 @@ def test_login_attempts_are_limited(anon):
 
 def test_successful_login_does_not_reset_earlier_failures(client):
     assert add_user(client).status_code == 201
-    anon = TestClient(client.app, follow_redirects=False)
+    anon = another(client)
     # A viewer's own successful login gives no new attempts at someone else's password.
     for _ in range(4):
         assert sign_in(anon, password="wrong").status_code == 401
@@ -116,6 +117,7 @@ def test_login_attempt_is_counted_before_the_password_is_checked(anon):
 
 def sign_in_blocked_after(client: TestClient, more: int) -> bool:
     """Whether login is blocked after `more` further failed attempts."""
+    # Called from inside a request, so these attempts need an event loop of their own.
     other = TestClient(client.app, follow_redirects=False)
     for _ in range(more):
         assert sign_in(other, password="wrong").status_code == 401
@@ -152,7 +154,7 @@ def test_logout_revokes_the_session_on_the_server(anon):
 
 def test_logout_needs_the_real_cookie_to_revoke(anon):
     cookie = sign_in(anon).cookies["promin_session"]
-    other = TestClient(anon.app, follow_redirects=False)
+    other = another(anon)
     other.cookies.set("promin_session", cookie.split(".", 1)[0] + ".guess")
     assert other.post("/logout").status_code == 303
     assert anon.get("/api/me").status_code == 200

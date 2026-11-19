@@ -50,6 +50,15 @@ def make_client(tmp_path: Path, login: bool = True, **overrides) -> TestClient:
     return client
 
 
+def another(client: TestClient) -> TestClient:
+    """One more browser of the same running app: its own cookies, and the same event loop.
+    A client made on its own runs every request and WebSocket in a loop of its own, and a
+    message sent from one loop to a socket waiting in another may never wake it."""
+    other = TestClient(client.app, follow_redirects=False)
+    other.portal = client.portal
+    return other
+
+
 def sign_in(client: TestClient, username: str = "admin", password: str = TOKEN):
     return client.post("/login", data={"username": username, "password": password})
 
