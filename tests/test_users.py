@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 
 from helpers import (
     VIEWER_PASSWORD,
     add_user,
+    another,
     change_stored,
     count_commits,
     needs_ffmpeg,
@@ -58,7 +58,7 @@ def test_builtin_admin_is_protected(client):
 
 def test_admin_role_user_cannot_delete_self(client):
     assert add_user(client, "ivan", "ivan-password-1", role="admin").status_code == 201
-    ivan = TestClient(client.app, follow_redirects=False)
+    ivan = another(client)
     assert sign_in(ivan, "ivan", "ivan-password-1").status_code == 303
     assert ivan.get("/api/users").status_code == 200
     assert ivan.delete("/api/users/ivan").status_code == 400
@@ -114,7 +114,7 @@ def test_password_change_ends_old_session(client, viewer):
     assert r.status_code == 204
     assert viewer.get("/api/videos").status_code == 401
 
-    fresh = TestClient(client.app, follow_redirects=False)
+    fresh = another(client)
     assert sign_in(fresh, "olena", VIEWER_PASSWORD).status_code == 401
     assert sign_in(fresh, "olena", "brand-new-pass-2").status_code == 303
     assert fresh.get("/api/videos").status_code == 200
@@ -129,12 +129,12 @@ def test_unknown_user_and_wrong_password_look_the_same(anon):
 
 def test_login_is_case_insensitive_for_username(client):
     assert add_user(client).status_code == 201
-    c = TestClient(client.app, follow_redirects=False)
+    c = another(client)
     assert sign_in(c, " Olena ", VIEWER_PASSWORD).status_code == 303
 
 
 def test_logout_clears_session(client):
-    c = TestClient(client.app, follow_redirects=False)
+    c = another(client)
     assert sign_in(c).status_code == 303
     assert c.get("/api/me").status_code == 200
     r = c.post("/logout")
@@ -162,7 +162,7 @@ def test_old_password_hash_is_strengthened_at_login(client, viewer):
     services.sessions.refingerprint("olena", before, services.auth.fingerprint("olena"))
     assert viewer.get("/api/me").status_code == 200
 
-    other = TestClient(client.app, follow_redirects=False)
+    other = another(client)
     assert sign_in(other, "olena", "wrong-password").status_code == 401
     assert users.get("olena")["hash"] == legacy_hash  # a wrong password changes nothing
 
@@ -173,7 +173,7 @@ def test_old_password_hash_is_strengthened_at_login(client, viewer):
     stored = users.get("olena")
     assert stored["rounds"] == crypto.PBKDF2_ROUNDS and stored["hash"] != legacy_hash
     assert viewer.get("/api/me").status_code == 200  # still logged in elsewhere
-    assert sign_in(TestClient(client.app, follow_redirects=False), "olena", VIEWER_PASSWORD).status_code == 303
+    assert sign_in(another(client), "olena", VIEWER_PASSWORD).status_code == 303
 
 
 def test_a_wrong_password_costs_the_same_hashing_whoever_it_is_for(client, monkeypatch):
@@ -197,6 +197,6 @@ def test_a_wrong_password_costs_the_same_hashing_whoever_it_is_for(client, monke
     monkeypatch.setattr(auth, "hash_password", counted)
     for username in ("nobody", "olena", "taras"):
         del spent[:]
-        fresh = TestClient(client.app, follow_redirects=False)
+        fresh = another(client)
         assert sign_in(fresh, username, "wrong-password").status_code == 401
         assert sum(spent) == crypto.PBKDF2_ROUNDS, username

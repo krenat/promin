@@ -4,13 +4,13 @@ from __future__ import annotations
 import time
 
 import pytest
-from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from helpers import (
     NEW_ENCODING,
     TOKEN,
     add_user,
+    another,
     change_stored,
     make_client,
     pair_key,
@@ -69,7 +69,7 @@ def test_wrong_or_unknown_code_is_rejected(client, projector):
 
 
 def test_scanning_without_a_login_returns_to_the_code_after_it(projector):
-    anon = TestClient(projector.app, follow_redirects=False)  # a phone that is not logged in
+    anon = another(projector)  # a phone that is not logged in
     pairing = start_pairing(projector)
     path = pairing["url"][len("http://testserver"):]
     r = anon.get(path)
@@ -129,7 +129,7 @@ def test_approving_requires_a_logged_in_user(client, projector, viewer):
     assert viewer.post("/api/pair/approve", json=pair_key(pairing)).status_code == 200
     assert pair_status(projector, pairing["token"]) == "approved"
     # But a projector itself cannot pair other projectors.
-    other = TestClient(client.app, follow_redirects=False)
+    other = another(client)
     second = start_pairing(other)
     assert projector.post("/api/pair/approve", json=pair_key(second)).status_code == 403
 
@@ -179,7 +179,7 @@ def test_forged_device_cookie_is_rejected(client, projector):
     pair_status(projector, pairing["token"])
     device_id = client.get("/api/devices").json()["devices"][0]["id"]
 
-    forged = TestClient(client.app, follow_redirects=False)
+    forged = another(client)
     forged.cookies.set("promin_session", "@%s.%s" % (device_id, "guess"))
     assert forged.get("/api/me").status_code == 401
     forged.cookies.set("promin_session", "@nope.guess")
@@ -194,7 +194,7 @@ def test_pairing_starts_are_limited(projector):
 
 def test_devices_survive_restart(tmp_path):
     with make_client(tmp_path) as c:
-        tv = TestClient(c.app, follow_redirects=False)
+        tv = another(c)
         pairing = start_pairing(tv)
         c.post("/api/pair/approve", json=pair_key(pairing))
         cookie = tv.post("/api/pair/status", json={"token": pairing["token"]}).cookies["promin_session"]

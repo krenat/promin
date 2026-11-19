@@ -3,9 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
-from helpers import VIEWER_PASSWORD, add_user, make_client, make_clip, sign_in
+from helpers import VIEWER_PASSWORD, add_user, another, make_client, make_clip, sign_in
 
 
 @pytest.fixture(autouse=True)
@@ -43,7 +42,7 @@ def anon(tmp_path: Path):
 def viewer(client, tmp_path):
     """A client logged in as a viewer; `client` alongside stays the administrator."""
     assert add_user(client).status_code == 201
-    c = TestClient(client.app, follow_redirects=False)
+    c = another(client)
     assert sign_in(c, "olena", VIEWER_PASSWORD).status_code == 303
     return c
 
@@ -51,4 +50,4 @@ def viewer(client, tmp_path):
 @pytest.fixture
 def projector(client):
     """A client without a login that plays the projector browser."""
-    return TestClient(client.app, follow_redirects=False)
+    return another(client)

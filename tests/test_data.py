@@ -11,6 +11,7 @@ from helpers import (
     VIEWER_PASSWORD,
     add_fake_video,
     add_user,
+    another,
     make_client,
     sign_in,
     video_ids,
@@ -132,7 +133,6 @@ OLD_VIDEO = {
 
 
 def test_json_files_of_an_older_version_are_brought_over(tmp_path):
-    from fastapi.testclient import TestClient
 
     from promin import crypto
     from promin.crypto import hash_password, hash_secret
@@ -167,7 +167,7 @@ def test_json_files_of_an_older_version_are_brought_over(tmp_path):
         # The old password still logs in, and is hashed again with today's rounds.
         users = c.app.state.services.users
         assert users.get("olena")["rounds"] == crypto.LEGACY_PBKDF2_ROUNDS
-        phone = TestClient(c.app, follow_redirects=False)
+        phone = another(c)
         assert sign_in(phone, "olena", VIEWER_PASSWORD).status_code == 303
         assert users.get("olena")["rounds"] == crypto.PBKDF2_ROUNDS
 
