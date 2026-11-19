@@ -28,29 +28,7 @@ Python 3.12, FastAPI, Uvicorn, ffmpeg, Docker.
 
 ## Code layout
 
-`main.py` only starts the server; the code is in the `promin` package.
-
-| Module | What is in it |
-|---|---|
-| `config` | settings from the environment, paths |
-| `db` | the SQLite database: transactions, the copy kept at every start, recovery of a damaged file |
-| `legacy` | bringing over the JSON files that older versions kept their data in |
-| `library` | the video list, folders and the watch queue |
-| `encoding` | the encoding settings |
-| `ffmpeg`, `transcode` | the plan and the ffmpeg commands; the worker that runs them |
-| `upload` | what may be uploaded, and writing it to disk |
-| `parsing` | reading values a page sends, which may be anything |
-| `accounts`, `devices` | users and their sessions; paired projectors |
-| `auth`, `crypto` | who is asking, by the cookie; the login limit; hashing |
-| `hub` | the live connections of the projector page and the phones |
-| `playback` | the watch queue as phones see it, and what the projector plays next |
-| `tvtest` | the projector check |
-| `services` | all of the above for one running app, and what spans several of them |
-| `assets` | serving `static/` under a version, so browsers do not mix old and new files |
-| `routes/` | the pages and the API, one module per subject |
-| `templates/` | the pages: markup only |
-| `static/` | the logo, and the styles (`css/`) and scripts (`js/`) of each page |
-| `app` | `create_app`, which puts it together |
+`main.py` only starts the server; the code is in the `promin` package. The pages and the API are in `routes/`, one module per subject, the pages' markup in `templates/`, their styles and scripts in `static/`.
 
 Every route names who may call it (`AUTH`, `MEMBER` or `ADMIN` from `routes/deps.py`); a test fails if one is left open by accident.
 
