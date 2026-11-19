@@ -1,4 +1,3 @@
-"""Fixtures shared by the test files."""
 from __future__ import annotations
 
 from pathlib import Path

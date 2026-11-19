@@ -1,4 +1,3 @@
-"""Logging in and out."""
 from __future__ import annotations
 
 import re

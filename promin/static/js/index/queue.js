@@ -1,5 +1,3 @@
-// The watch queue of the projector.
-
 import { api, failureText } from '../api.js';
 import { el } from '../dom.js';
 import { canCast, command, updateRemote } from './remote.js';

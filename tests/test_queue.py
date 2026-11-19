@@ -1,4 +1,3 @@
-"""The shared watch queue."""
 from __future__ import annotations
 
 from fastapi.testclient import TestClient

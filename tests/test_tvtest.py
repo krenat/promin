@@ -1,4 +1,3 @@
-"""The projector check."""
 from __future__ import annotations
 
 import time
