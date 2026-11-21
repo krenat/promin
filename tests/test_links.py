@@ -4,6 +4,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import time
 import urllib.error
 
 import pytest
@@ -11,7 +12,7 @@ import pytest
 from helpers import another, make_client, remote_closes
 from promin import shortener
 from promin.devices import LINK_TTL
-from promin.shortener import ALIAS_ALPHABET, IsGd, ShortenerError
+from promin.shortener import ALIAS_ALPHABET, ShortenerError, SpooMe, named
 
 
 class FakeShortener:
@@ -21,7 +22,8 @@ class FakeShortener:
         self.asked: list = []
         self.fails = False
 
-    def shorten(self, url: str) -> str:
+    def shorten(self, url: str, ttl: int) -> str:
+        assert ttl == LINK_TTL
         if self.fails:
             raise ShortenerError("down")
         self.asked.append(url)
@@ -184,57 +186,81 @@ def test_no_link_is_made_for_an_address_only_this_machine_knows(client, links, h
 
 def test_the_shortener_is_chosen_by_the_settings(tmp_path):
     assert shortener.create("") is None
-    assert isinstance(shortener.create("isgd"), IsGd)
+    assert isinstance(shortener.create("spoo"), SpooMe)
     # A wrong name switches links off; it does not stop the service.
     with make_client(tmp_path, shortener="nope") as c:
         assert c.get("/api/me").json()["links"] is False
 
 
+class Answer(io.BytesIO):
+    status = 201
+
+
+def refusal(status: int, **fields) -> urllib.error.HTTPError:
+    body = io.BytesIO(json.dumps(fields).encode())
+    return urllib.error.HTTPError("u", status, "Refused", None, body)  # type: ignore[arg-type]
+
+
 def answers(monkeypatch, *replies):
-    """Makes is.gd answer with these in turn; returns the addresses that were asked for."""
+    """Makes spoo.me answer with these in turn; returns what it was sent each time."""
     asked: list = []
     queue = list(replies)
 
-    def urlopen(url, timeout):
-        asked.append(url)
+    def urlopen(request, timeout):
+        assert request.full_url == "https://spoo.me/api/v1/shorten" and request.get_method() == "POST"
+        asked.append(json.loads(request.data))
         reply = queue.pop(0)
         if isinstance(reply, Exception):
             raise reply
-        return io.BytesIO(reply if isinstance(reply, bytes) else json.dumps(reply).encode())
+        return Answer(reply if isinstance(reply, bytes) else json.dumps(reply).encode())
 
     monkeypatch.setattr("promin.shortener.urllib.request.urlopen", urlopen)
     return asked
 
 
-def test_isgd_is_asked_for_an_alias_that_is_easy_to_type(monkeypatch):
-    asked = answers(monkeypatch, {"shorturl": "https://is.gd/abc234"})
-    assert IsGd().shorten("http://1.2.3.4:8084/c/tok") == "is.gd/abc234"
-    assert asked[0].startswith("https://is.gd/create.php?format=json&url=http%3A%2F%2F1.2.3.4%3A8084%2Fc%2Ftok&shorturl=")
-    alias = asked[0].split("shorturl=")[1]
-    assert len(alias) == 6 and set(alias) <= set(ALIAS_ALPHABET)
+def test_spoo_is_asked_for_a_link_that_is_easy_to_type_and_ends_by_itself(monkeypatch):
+    asked = answers(monkeypatch, {"short_url": "https://spoo.me/abc23"})
+    before = int(time.time())
+    assert SpooMe().shorten("http://tv.example.org:8084/c/tok", 600) == "spoo.me/abc23"
+    assert asked[0]["long_url"] == "http://tv.example.org:8084/c/tok"
+    assert len(asked[0]["alias"]) == 5 and set(asked[0]["alias"]) <= set(ALIAS_ALPHABET)
+    # Nobody can delete a link made without an account, so it is told when to end.
+    assert before + 600 <= asked[0]["expire_after"] <= int(time.time()) + 600
+    # An answer without the address still names the alias that was asked for.
+    asked = answers(monkeypatch, {"status": "ACTIVE"})
+    assert SpooMe().shorten("http://tv.example.org/c/tok", 600) == "spoo.me/" + asked[0]["alias"]
 
 
-def test_isgd_tries_another_alias_when_one_is_taken(monkeypatch):
-    taken = {"errorcode": 2, "errormessage": "taken"}
-    asked = answers(monkeypatch, taken, {"shorturl": "https://is.gd/xyz789"})
-    assert IsGd().shorten("http://a/c/t") == "is.gd/xyz789"
-    assert len(asked) == 2 and asked[0] != asked[1]
-    answers(monkeypatch, taken, taken, taken)
+def test_a_bare_ip_address_is_given_a_name(monkeypatch):
+    """spoo.me refuses an address with a bare IP in it."""
+    asked = answers(monkeypatch, {"short_url": "https://spoo.me/abc23"})
+    SpooMe().shorten("http://203.0.113.5:8084/c/tok", 600)
+    assert asked[0]["long_url"] == "http://203.0.113.5.nip.io:8084/c/tok"
+    assert named("http://203.0.113.5/c/tok") == "http://203.0.113.5.nip.io/c/tok"
+    assert named("https://203.0.113.5:8443/c/tok?x=1") == "https://203.0.113.5.nip.io:8443/c/tok?x=1"
+    for kept in ("http://tv.example.org:8084/c/tok", "http://[2001:db8::1]:8084/c/tok", "http://999.1.1.1/c/tok"):
+        assert named(kept) == kept
+
+
+def test_spoo_tries_another_alias_when_one_is_taken(monkeypatch):
+    taken = refusal(409, error="Alias already exists", code="conflict", field="alias")
+    asked = answers(monkeypatch, taken, {"short_url": "https://spoo.me/xyz78"})
+    assert SpooMe().shorten("http://a.example/c/t", 600) == "spoo.me/xyz78"
+    assert len(asked) == 2 and asked[0]["alias"] != asked[1]["alias"]
+    asked = answers(monkeypatch, *[refusal(422, error="alias", field="alias") for _ in range(3)])
     with pytest.raises(ShortenerError):
-        IsGd().shorten("http://a/c/t")
+        SpooMe().shorten("http://a.example/c/t", 600)
+    assert len(asked) == 3
 
 
-def test_isgd_errors_are_reported_not_retried(monkeypatch):
-    refused = urllib.error.HTTPError(
-        "u", 400, "Bad", None, io.BytesIO(b'{"errorcode": 1, "errormessage": "bad url"}')  # type: ignore[arg-type]
-    )
+def test_spoo_errors_are_reported_not_retried(monkeypatch):
     unreadable = urllib.error.HTTPError("u", 502, "Bad", None, None)  # type: ignore[arg-type]
-    cut_short = http.client.IncompleteRead(b"{")
     for reply in (
-        {"errorcode": 3, "errormessage": "rate limit"}, refused, unreadable, cut_short,
+        refusal(400, error="URL is not allowed or invalid", code="validation_error", field="long_url"),
+        refusal(429, error="rate limit"), unreadable, http.client.IncompleteRead(b"{"),
         OSError("no network"), b"<html>", b"[]",
     ):
         asked = answers(monkeypatch, reply)
         with pytest.raises(ShortenerError):
-            IsGd().shorten("http://a/c/t")
+            SpooMe().shorten("http://a.example/c/t", 600)
         assert len(asked) == 1

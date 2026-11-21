@@ -36,7 +36,7 @@ async def create_link(request: Request, user: User, svc: Svc) -> Dict[str, Any]:
             400, "Відкрийте цю сторінку за адресою сервера, яку побачить і проектор, а не localhost."
         )
     # Counted for everyone together, and before the shortener is asked: it is this server
-    # that the shortener counts, and a cancelled link stays there all the same.
+    # that the shortener counts, cancelled links included.
     if svc.links.full() or svc.link_limiter.blocked(ALL):
         raise HTTPException(429, "Забагато посилань. Спробуйте пізніше або скористайтесь QR-кодом.")
     svc.link_limiter.fail(ALL)
@@ -44,7 +44,7 @@ async def create_link(request: Request, user: User, svc: Svc) -> Dict[str, Any]:
     # The phone made this request, so its address is the one the projector can reach too.
     long_url = "%sc/%s" % (request.base_url, token)
     try:
-        short = await asyncio.to_thread(svc.shortener.shorten, long_url)
+        short = await asyncio.to_thread(svc.shortener.shorten, long_url, LINK_TTL)
     except ShortenerError as exc:
         log.warning("The shortener gave no link: %s", exc)
         raise HTTPException(

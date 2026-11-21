@@ -124,14 +124,15 @@ The same page has a "check the projector" button that shows which of these setti
 
 ### Connecting by a short link
 
-Typing `http://<address>:<port>/tv` with a TV remote is slow, and scanning a QR code needs the phone in front of the screen. With `PROMIN_SHORTENER=isgd` the phone page offers a third way: tap the projector indicator, then the short link button, and type the address it shows (such as `is.gd/k7x2mq`) on the projector.
+Typing `http://<address>:<port>/tv` with a TV remote is slow, and scanning a QR code needs the phone in front of the screen. With `PROMIN_SHORTENER=spoo` the phone page offers a third way: tap the projector indicator, then the short link button, and type the address it shows (such as `spoo.me/k7x2m`) on the projector.
 
 - The link is valid for 10 minutes and works once. The screen that opens it and presses the start button becomes a paired projector, approved by whoever made the link, exactly as after a QR code; it appears in the list on the `/users` page and is disconnected there. The phone stops showing a link once it is used.
 - The press is what spends the link, so a program that only fetches the address (a link previewer, the shortener's own checks) cannot use it up. A browser that is logged in already, such as your own phone, stays logged in and leaves the link unspent.
 - After that first use the link opens nothing: the address left in the projector's history shows only a QR code, whether the projector was disconnected or not.
 - A link that was not opened can be cancelled on the phone by its maker, or by an administrator. At most 30 links are made in an hour, by everyone together.
 - Make the link from the phone page opened at the address the projector can reach too: none is made for `localhost`.
-- To make the short address the service sends its own address with the one-time token to is.gd, which needs no account. is.gd cannot delete a link, so nothing depends on that: the token on this server is what ends it. Whoever guesses the six characters of a link within its 10 minutes becomes a projector instead of yours, which then shows a QR code; a projector can only show videos, and it is in the list.
+- To make the short address the service sends its own address with the one-time token to spoo.me, which needs no account or key. A link made without an account cannot be deleted, so each one is told to expire after the same 10 minutes: nothing that names the server stays there. Whoever guesses the five characters of a link within that time, and presses start before you do, becomes a projector instead of yours, which then shows a QR code; a projector can only show videos, and it is in the list.
+- spoo.me refuses an address with a bare IP in it. A server without a name of its own is therefore named `<ip>.nip.io` in the link, which the public nip.io DNS service resolves back to the IP, and the projector stays on that name. On a network whose DNS does not answer for nip.io the link does not open: use the QR code there, or give the server a name.
 
 ### Watch queue
 

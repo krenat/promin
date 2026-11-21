@@ -2,18 +2,20 @@
 from __future__ import annotations
 
 import http.client
+import ipaddress
 import json
 import logging
 import secrets
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Optional, Protocol
+from typing import Dict, Optional, Protocol, Tuple
 
 # What an alias is made of: typed with a TV remote, so lower case only and without the
 # characters that are easy to mistake for each other (0 and o, 1 and l and i).
 ALIAS_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
-ALIAS_LENGTH = 6
+ALIAS_LENGTH = 5
 ATTEMPTS = 3
 TIMEOUT = 5.0
 
@@ -25,39 +27,75 @@ class ShortenerError(Exception):
 
 
 class Shortener(Protocol):
-    def shorten(self, url: str) -> str:
-        """Returns the short address as it is typed, without the scheme. Blocks: call it
-        from a thread."""
+    def shorten(self, url: str, ttl: int) -> str:
+        """Returns the short address as it is typed, without the scheme; it is to stop
+        working after `ttl` seconds. Blocks: call it from a thread."""
 
 
 def new_alias() -> str:
     return "".join(secrets.choice(ALIAS_ALPHABET) for _ in range(ALIAS_LENGTH))
 
 
-class IsGd:
-    """is.gd: no account and no key. A link made there cannot be deleted or changed, so
-    what ends a link is its token on this server, never the shortener."""
+def named(url: str) -> str:
+    """The same address with a name in place of a bare IPv4 address: 1.2.3.4 becomes
+    1.2.3.4.nip.io, which a public DNS service resolves back to 1.2.3.4 without anything
+    being registered. An address that has a name already is returned as it is."""
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    try:
+        if ipaddress.ip_address(host).version != 4:
+            return url
+    except ValueError:
+        return url
+    netloc = "%s.nip.io" % host + (":%d" % parts.port if parts.port else "")
+    return urllib.parse.urlunsplit(parts._replace(netloc=netloc))
 
-    endpoint = "https://is.gd/create.php"
-    alias_taken = 2  # the errorcode for a problem with the alias we asked for
 
-    def shorten(self, url: str) -> str:
+class SpooMe:
+    """spoo.me: no account and no key, and a link can be told when to expire. Without an
+    account a link cannot be deleted, so every link is made to expire by itself: nothing
+    that names this server stays at the shortener.
+
+    It refuses an address with a bare IP in it (checked 21 November 2026), so a server
+    without a name of its own is given one that needs no registration: see `named`."""
+
+    endpoint = "https://spoo.me/api/v1/shorten"
+    host = "spoo.me"
+
+    def shorten(self, url: str, ttl: int) -> str:
+        expires = int(time.time()) + ttl
+        url = named(url)
         for _ in range(ATTEMPTS):
-            answer = self._ask(url, new_alias())
-            short = answer.get("shorturl")
-            if isinstance(short, str) and short:
-                return short.split("://", 1)[-1]
-            if answer.get("errorcode") != self.alias_taken:
-                raise ShortenerError(str(answer.get("errormessage") or answer))
+            alias = new_alias()
+            status, answer = self._ask({"long_url": url, "alias": alias, "expire_after": expires})
+            if status in (200, 201):
+                short = answer.get("short_url")
+                if isinstance(short, str) and short:
+                    return short.split("://", 1)[-1]
+                return "%s/%s" % (self.host, alias)
+            if not self._alias_taken(status, answer):
+                raise ShortenerError("HTTP %d: %s" % (status, answer.get("error") or answer))
         raise ShortenerError("no free alias in %d attempts" % ATTEMPTS)
 
-    def _ask(self, url: str, alias: str) -> dict[str, object]:
-        query = urllib.parse.urlencode({"format": "json", "url": url, "shorturl": alias})
+    @staticmethod
+    def _alias_taken(status: int, answer: Dict[str, object]) -> bool:
+        return status == 409 or answer.get("field") == "alias"
+
+    def _ask(self, fields: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        request = urllib.request.Request(
+            self.endpoint, data=json.dumps(fields).encode("utf-8"), method="POST",
+            headers={
+                "Content-Type": "application/json", "Accept": "application/json",
+                # Some sites refuse the name urllib gives itself.
+                "User-Agent": "Mozilla/5.0 (compatible; short-link-client)",
+            },
+        )
         try:
-            with urllib.request.urlopen("%s?%s" % (self.endpoint, query), timeout=TIMEOUT) as r:
-                body = r.read(4096)
+            with urllib.request.urlopen(request, timeout=TIMEOUT) as r:
+                status, body = r.status, r.read(4096)
         except urllib.error.HTTPError as exc:
-            # An error may come with an HTTP error status and the explanation in the body.
+            # A refusal comes with an HTTP error status and the explanation in the body.
+            status = exc.code
             try:
                 body = exc.read(4096)
             except Exception:
@@ -70,13 +108,13 @@ class IsGd:
         try:
             answer = json.loads(body)
         except ValueError as exc:
-            raise ShortenerError("not JSON: %r" % body[:100]) from exc
+            raise ShortenerError("HTTP %d, not JSON: %r" % (status, body[:100])) from exc
         if not isinstance(answer, dict):
-            raise ShortenerError("unexpected answer: %r" % body[:100])
-        return answer
+            raise ShortenerError("HTTP %d, unexpected answer: %r" % (status, body[:100]))
+        return status, answer
 
 
-SHORTENERS = {"isgd": IsGd}
+SHORTENERS = {"spoo": SpooMe}
 
 
 def create(name: str) -> Optional[Shortener]:

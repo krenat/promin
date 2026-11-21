@@ -23,8 +23,7 @@ PAIR_STARTS_PER_WINDOW = 10
 # may wait at once.
 LINK_TTL = 10 * 60
 LINK_MAX_PENDING = 20
-# How many links may be made in an hour: each one stays at the shortener for good, and the
-# shortener counts what one address asks of it.
+# How many links may be made in an hour: the shortener counts what one address asks of it.
 LINKS_PER_HOUR = 30
 
 
