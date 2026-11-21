@@ -10,12 +10,21 @@ from .accounts import SessionStore, UserStore
 from .auth import Auth, LoginLimiter
 from .config import Settings
 from .db import DB_NAME, Database
-from .devices import PAIR_CODE_TTL, PAIR_STARTS_PER_WINDOW, DeviceStore, Pairing
+from .devices import (
+    LINKS_PER_HOUR,
+    PAIR_CODE_TTL,
+    PAIR_STARTS_PER_WINDOW,
+    DeviceStore,
+    Links,
+    Pairing,
+)
 from .encoding import Encoding, EncodingStore
 from .hub import WS_UNAUTHORIZED, Hub
 from .legacy import import_json
 from .library import PUBLIC_KEYS, FolderStore, QueueStore, Video, VideoStore, remove_files
 from .playback import Playback
+from .shortener import Shortener
+from .shortener import create as create_shortener
 from .transcode import Transcoder
 from .tvtest import TvTest
 
@@ -36,8 +45,12 @@ class Services:
     devices: DeviceStore
     auth: Auth
     pairing: Pairing
+    links: Links
+    # None when connecting by a short link is switched off.
+    shortener: Optional[Shortener]
     limiter: LoginLimiter
     pair_start_limiter: LoginLimiter
+    link_limiter: LoginLimiter
     hub: Hub
     playback: Playback
     tvtest: TvTest
@@ -74,8 +87,11 @@ class Services:
             devices=devices,
             auth=Auth(settings.token, users, sessions, devices),
             pairing=Pairing(),
+            links=Links(),
+            shortener=create_shortener(settings.shortener),
             limiter=LoginLimiter(),
             pair_start_limiter=LoginLimiter(PAIR_STARTS_PER_WINDOW, PAIR_CODE_TTL),
+            link_limiter=LoginLimiter(LINKS_PER_HOUR, 3600),
             hub=hub,
             playback=Playback(hub, queue, videos),
             tvtest=TvTest(db),

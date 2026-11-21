@@ -1,6 +1,7 @@
 // The remote: the connection to the server, the projector's state and the control panel.
 
 import { renderList } from './library.js';
+import { linkUsed } from './link.js';
 import { renderQueue } from './queue.js';
 import { state } from './state.js';
 import { ICON_PAUSE, ICON_PLAY, displayName, formatDuration, message } from './ui.js';
@@ -121,6 +122,8 @@ export function connect() {
       state.queue = data.queue || [];
       renderQueue();
       updateRemote();
+    } else if (data.type === 'link') {
+      linkUsed(data.id);
     } else if (data.type === 'error') {
       message.textContent = data.message;
     }

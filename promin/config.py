@@ -23,6 +23,8 @@ class Settings:
     disk_reserve_bytes: int = 500 * MB
     max_bitrate_kbps: int = 8000
     x264_preset: str = "veryfast"
+    # Which URL shortener makes the short links for connecting a projector; "" for none.
+    shortener: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -34,6 +36,7 @@ class Settings:
             max_upload_bytes=int(env.get("PROMIN_MAX_UPLOAD_MB", "4096")) * MB,
             max_bitrate_kbps=int(env.get("PROMIN_MAX_BITRATE_KBPS", "8000")),
             x264_preset=env.get("PROMIN_X264_PRESET", "veryfast"),
+            shortener=env.get("PROMIN_SHORTENER", "").strip().lower(),
         )
 
     @property
