@@ -10,6 +10,7 @@
   var screens = ['pair', 'start', 'waiting', 'replaced'];
   var pairTimer = null;
   var PAIR_HINT = 'Наведіть камеру телефона на цей код і відкрийте посилання';
+  var linkSpent = false;    // this screen was opened by a short link that no longer works
   var WAITING_HINT = 'Оберіть відео на телефоні';
   var note = document.getElementById('note');
 
@@ -503,7 +504,7 @@
     clearTimeout(retryTimer);
     if (current) { video.pause(); }
     pairQr.className = '';
-    pairText.textContent = PAIR_HINT;
+    pairText.textContent = (linkSpent ? 'Це посилання вже не діє. ' : '') + PAIR_HINT;
     showScreen('pair');
     request('POST', '/api/pair/start', null, function (status, data) {
       if (status !== 200 || !data) {
@@ -581,10 +582,39 @@
 
   setInterval(sendState, 1000);
 
+  function noServer() {
+    showScreen('waiting');
+    waitingText.textContent = 'Немає зв\u2019язку із сервером, підключаюсь…';
+    setTimeout(function () { location.reload(); }, 5000);
+  }
+
   // If this screen is already paired or someone logged in here with a password, start right away.
-  request('GET', '/api/me', null, function (status) {
-    if (status === 200) ready();
-    else if (status === 401) startPairing();
-    else { showScreen('waiting'); waitingText.textContent = 'Немає зв\u2019язку із сервером, підключаюсь…'; setTimeout(function () { location.reload(); }, 5000); }
-  });
+  function checkLogin() {
+    request('GET', '/api/me', null, function (status) {
+      if (status === 200) ready();
+      else if (status === 401) startPairing();
+      else noServer();
+    });
+  }
+
+  // ---------------------------------------------------- connecting by a short link
+
+  // The address bar and the history keep /tv, which opens nothing by itself, and not the
+  // address with the token.
+  function forgetLink() {
+    try { window.history.replaceState(null, '', '/tv'); } catch (e) {}
+  }
+
+  // A short link typed on this screen led to /c/<token>. The token works once: it makes
+  // this screen a paired projector. One that no longer works leaves the screen as it was:
+  // paired already, or showing a QR code.
+  var link = /^\/c\/([A-Za-z0-9_-]+)$/.exec(location.pathname || '');
+  if (!link) checkLogin();
+  else {
+    request('POST', '/api/links/redeem', { token: link[1] }, function (status) {
+      if (status === 200) { forgetLink(); ready(); }
+      else if (status === 404) { forgetLink(); linkSpent = true; checkLogin(); }
+      else noServer();
+    });
+  }
 })();

@@ -46,6 +46,15 @@
   <section id="pair" hidden>
     <p>Відкрийте на проекторі адресу <span id="pair-url"></span></p>
     <p class="hint">На екрані з'явиться QR-код. Наведіть на нього камеру цього телефона, відкрийте посилання і підтвердьте підключення.</p>
+    <div id="link" hidden>
+      <button id="link-create" class="outline" type="button">Підключити за коротким посиланням</button>
+      <div id="link-shown" hidden>
+        <p class="hint">Або введіть на проекторі цю адресу, без QR-коду:</p>
+        <p id="link-url"></p>
+        <p class="hint" id="link-left"></p>
+        <button id="link-cancel" class="outline" type="button">Скасувати посилання</button>
+      </div>
+    </div>
     <div id="tv-on" hidden>
       <p class="hint">Проектором зараз є екран, на якому відкрито цю адресу. Якщо це не той екран, від'єднайте його: показ на ньому зупиниться, доки там не натиснуть «Показувати тут».</p>
       <button id="tv-disconnect" class="outline" type="button">Від'єднати проектор</button>

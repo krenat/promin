@@ -35,7 +35,10 @@ def test_every_route_names_who_may_call_it():
     routes = [r for router in ROUTERS for r in router.routes if isinstance(r, APIRoute)]
     assert len(routes) > 30
     open_routes = {r.path for r in routes if not guarded(r.dependant)}
-    assert open_routes == {"/login", "/logout", "/tv", "/api/pair/start", "/api/pair/status"}
+    assert open_routes == {
+        "/login", "/logout", "/tv", "/api/pair/start", "/api/pair/status",
+        "/c/{token}", "/api/links/redeem",
+    }
 
 
 def test_pages_find_their_styles_and_scripts(tmp_path):
@@ -58,6 +61,7 @@ def test_pages_find_their_styles_and_scripts(tmp_path):
         check(client, "settings.html", "/settings")
         check(client, "users.html", "/users")
         check(client, "tv.html", "/tv")
+        check(client, "tv.html", "/c/" + "a" * 32)
         check(client, "pair.html", "/pair?t=" + "a" * 24)
     with make_client(tmp_path, login=False) as anon:
         check(anon, "login.html", "/login")

@@ -32,6 +32,9 @@ button.projector { background: transparent; border: 0; padding: 0; font-weight: 
 #pair p { margin: 0; }
 #pair .hint { margin-top: 8px; color: var(--muted); font-size: 14px; }
 #pair-url { font-weight: 600; overflow-wrap: anywhere; }
+#link { margin-top: 12px; }
+#link-url { font-size: 28px; font-weight: 700; letter-spacing: 0.04em; overflow-wrap: anywhere; margin-top: 4px; }
+#link-cancel { margin-top: 12px; }
 #tv-on { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
 #tv-disconnect { margin-top: 12px; }
 .projector.on .dot { background: var(--accent); }

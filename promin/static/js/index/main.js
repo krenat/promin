@@ -6,6 +6,7 @@
 
 import { api } from '../api.js';
 import { disk, refresh } from './library.js';
+import { offerLinks } from './link.js';
 import { closePlayer, player } from './player.js';
 import { connect } from './remote.js';
 import { setSelecting } from './selection.js';
@@ -86,6 +87,7 @@ api('GET', '/api/me')
     disk.hidden = !state.canManage;
     document.getElementById('users-link').hidden = !state.isAdmin;
     document.getElementById('settings-link').hidden = !state.canManage;
+    offerLinks(state.canManage && me.links);
     connect();
     return refresh();
   })

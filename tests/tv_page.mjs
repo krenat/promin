@@ -53,11 +53,12 @@ function videoElement(id) {
   });
 }
 
-export function openPage() {
+// `path` is the address the page was opened at; a short link leads to /c/<token>.
+export function openPage(path) {
   const page = {
     now: 1000000, timers: [], nextTimer: 1,
     sockets: [], requests: [], focused: null, fullscreen: 0, reloads: 0, inserted: [],
-    elements: {},
+    elements: {}, path: path || '/tv',
   };
 
   ids.forEach((id) => { page.elements[id] = id === 'video' ? videoElement(id) : element(id); });
@@ -154,7 +155,8 @@ export function openPage() {
       createElement: (tag) => (tag === 'video' ? videoElement('') : element('')),
       addEventListener(type, fn) { (documentListeners[type] = documentListeners[type] || []).push(fn); },
     },
-    location: { protocol: 'http:', host: 'promin.test', reload() { page.reloads++; } },
+    location: { protocol: 'http:', host: 'promin.test', pathname: page.path, reload() { page.reloads++; } },
+    history: { replaceState(state, title, url) { page.path = url; } },
     navigator: { userAgent: 'TestTV/1.0' },
     screen: { width: 1920, height: 1080 },
     URL: { createObjectURL: () => 'blob:clip', revokeObjectURL() {} },

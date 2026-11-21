@@ -51,6 +51,43 @@ test('an expired QR code is replaced by a new one, and a busy server is asked ag
   assert.equal(page.requests.filter((r) => r.url === '/api/pair/start').length, 3);
 });
 
+test('a short link makes the screen a projector and leaves /tv in the address bar', () => {
+  const page = openPage('/c/tok_en-1');
+  const redeem = page.request('POST', '/api/links/redeem');
+  assert.deepEqual(redeem.body, { token: 'tok_en-1' });
+  assert.equal(page.requests.length, 1);
+  redeem.respond(200, { ok: true });
+  assert.equal(page.path, '/tv');
+  assert.equal(page.screen(), 'start');
+  assert.equal(page.socket.url, 'ws://promin.test/ws?role=tv');
+});
+
+test('a short link that no longer works shows the QR code and says so', () => {
+  const page = openPage('/c/spent');
+  page.request('POST', '/api/links/redeem').respond(404, { detail: 'no' });
+  assert.equal(page.path, '/tv');
+  page.request('GET', '/api/me').respond(401, {});
+  assert.equal(page.screen(), 'pair');
+  assert.match(page.el('pair-text').textContent, /^Це посилання вже не діє\. Наведіть камеру/);
+  assert.equal(page.requests.filter((r) => r.url === '/api/pair/start').length, 1);
+});
+
+test('a spent short link on a screen that is already paired just starts it', () => {
+  const page = openPage('/c/spent');
+  page.request('POST', '/api/links/redeem').respond(404, { detail: 'no' });
+  page.request('GET', '/api/me').respond(200, {});
+  assert.equal(page.screen(), 'start');
+});
+
+test('a short link opened while the server is away is tried again with the same address', () => {
+  const page = openPage('/c/tok');
+  page.request('POST', '/api/links/redeem').fail();
+  assert.equal(page.path, '/c/tok');
+  assert.equal(page.screen(), 'waiting');
+  page.advance(5000);
+  assert.equal(page.reloads, 1);
+});
+
 test('a server that does not answer makes the page reload itself', () => {
   const page = openPage();
   page.request('GET', '/api/me').fail();

@@ -87,8 +87,9 @@ async def logout(request: Request, svc: Svc) -> Response:
 
 
 @router.get("/api/me", dependencies=AUTH)
-async def me(request: Request, response: Response, user: User) -> Dict[str, Any]:
+async def me(request: Request, response: Response, user: User, svc: Svc) -> Dict[str, Any]:
     # Every page asks this as it opens, so the cookie is renewed here: the browser keeps
     # it for COOKIE_MAX_AGE after the last visit, not after the login or the pairing.
     set_login_cookie(request, response, request.cookies[COOKIE_NAME])
-    return dict(user)
+    # `links`: whether the phone page offers to connect a projector by a short link.
+    return dict(user, links=svc.shortener is not None)

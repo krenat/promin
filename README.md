@@ -20,7 +20,7 @@ The interface is in Ukrainian.
 - playback on the projector controlled from the phone over WebSocket;
 - folders, one level deep;
 - a shared watch queue: the projector plays the next video by itself;
-- users with roles, and projectors paired with a QR code instead of a password.
+- users with roles, and projectors paired with a QR code or a short one-time link instead of a password.
 
 ## Stack
 
@@ -121,6 +121,15 @@ The same page has a "check the projector" button that shows which of these setti
 - The projector page and the remote reconnect by themselves after a connection drop.
 - The volume on the remote is the video's volume; the page cannot change the projector's system volume.
 - Any logged-in user can control playback, viewers included.
+
+### Connecting by a short link
+
+Typing `http://<address>:<port>/tv` with a TV remote is slow, and scanning a QR code needs the phone in front of the screen. With `PROMIN_SHORTENER=isgd` the phone page offers a third way: tap the projector indicator, then the short link button, and type the address it shows (such as `is.gd/k7x2mq`) on the projector.
+
+- The link is valid for 10 minutes and works once. The screen that opens it becomes a paired projector, approved by whoever made the link, exactly as after a QR code; it appears in the list on the `/users` page and is disconnected there.
+- After that first use the link opens nothing: the address left in the projector's history shows only a QR code, whether the projector was disconnected or not.
+- A link that was not opened can be cancelled on the phone by its maker, or by an administrator.
+- To make the short address the service sends its own address with the one-time token to is.gd, which needs no account. is.gd cannot delete a link, so nothing depends on that: the token on this server is what ends it. Whoever guesses the six characters of a link within its 10 minutes becomes a projector instead of yours, which then shows a QR code; a projector can only show videos, and it is in the list.
 
 ### Watch queue
 

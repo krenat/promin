@@ -17,8 +17,8 @@ from helpers import (
 
 
 def test_me_reports_role(client, viewer):
-    assert client.get("/api/me").json() == {"username": "admin", "role": "admin"}
-    assert viewer.get("/api/me").json() == {"username": "olena", "role": "viewer"}
+    assert client.get("/api/me").json() == {"username": "admin", "role": "admin", "links": False}
+    assert viewer.get("/api/me").json() == {"username": "olena", "role": "viewer", "links": False}
 
 
 def test_admin_manages_users(client, tmp_path):
