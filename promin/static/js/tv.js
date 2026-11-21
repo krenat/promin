@@ -10,6 +10,7 @@
   var screens = ['pair', 'start', 'waiting', 'replaced'];
   var pairTimer = null;
   var PAIR_HINT = 'Наведіть камеру телефона на цей код і відкрийте посилання';
+  var linkToken = null;     // the token of a short link, until the press that spends it
   var linkSpent = false;    // this screen was opened by a short link that no longer works
   var WAITING_HINT = 'Оберіть відео на телефоні';
   var note = document.getElementById('note');
@@ -551,6 +552,7 @@
   document.getElementById('start-btn').addEventListener('click', function () {
     enterFullscreen();
     started = true;
+    if (linkToken) { redeemLink(); return; }
     if (current) {
       showScreen('playing');
       play();
@@ -605,15 +607,34 @@
     try { window.history.replaceState(null, '', '/tv'); } catch (e) {}
   }
 
-  // A short link typed on this screen led to /c/<token>. The token works once: it makes
-  // this screen a paired projector. One that no longer works leaves the screen as it was:
-  // paired already, or showing a QR code.
+  // The token works once: it makes this screen a paired projector. One that no longer
+  // works leaves the screen showing a QR code.
+  function redeemLink() {
+    var token = linkToken;
+    linkToken = null;
+    showScreen('waiting');
+    waitingText.textContent = 'Підключаюсь…';
+    request('POST', '/api/links/redeem', { token: token }, function (status) {
+      if (status === 200) { forgetLink(); ready(); }
+      else if (status === 404 || status === 409) { forgetLink(); linkSpent = status === 404; checkLogin(); }
+      else noServer();
+    });
+  }
+
+  // A short link typed on this screen led to /c/<token>. A screen that is logged in
+  // already stays what it is, and the link stays unspent: a phone that opens the link must
+  // not turn into a projector. Otherwise the token is spent by the press on the start
+  // button, which a person makes and a program that only looks at the address does not.
   var link = /^\/c\/([A-Za-z0-9_-]+)$/.exec(location.pathname || '');
   if (!link) checkLogin();
   else {
-    request('POST', '/api/links/redeem', { token: link[1] }, function (status) {
+    request('GET', '/api/me', null, function (status) {
       if (status === 200) { forgetLink(); ready(); }
-      else if (status === 404) { forgetLink(); linkSpent = true; checkLogin(); }
+      else if (status === 401) {
+        linkToken = link[1];
+        showScreen('start');
+        document.getElementById('start-btn').focus();
+      }
       else noServer();
     });
   }

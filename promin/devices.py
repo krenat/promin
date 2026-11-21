@@ -5,7 +5,7 @@ from __future__ import annotations
 import secrets
 import sqlite3
 import time
-from typing import Dict, List, Optional, TypedDict
+from typing import Dict, List, Optional, TypedDict, TypeVar
 
 from .accounts import SESSION_IDLE_TTL
 from .crypto import hash_secret, same
@@ -23,6 +23,9 @@ PAIR_STARTS_PER_WINDOW = 10
 # may wait at once.
 LINK_TTL = 10 * 60
 LINK_MAX_PENDING = 20
+# How many links may be made in an hour: each one stays at the shortener for good, and the
+# shortener counts what one address asks of it.
+LINKS_PER_HOUR = 30
 
 
 class Device(TypedDict):
@@ -126,9 +129,7 @@ class Pairing:
         self.pending: Dict[str, PendingPairing] = {}  # polling token → entry
 
     def purge(self) -> None:
-        cutoff = time.monotonic() - PAIR_CODE_TTL
-        for token in [t for t, entry in self.pending.items() if entry["created"] < cutoff]:
-            del self.pending[token]
+        drop_older(self.pending, PAIR_CODE_TTL)
 
     def start(self) -> Optional[PairingStart]:
         self.purge()
@@ -155,6 +156,16 @@ class PendingLink(TypedDict):
     created: float
 
 
+Pending = TypeVar("Pending", PendingPairing, PendingLink)
+
+
+def drop_older(pending: Dict[str, Pending], ttl: float) -> None:
+    """Forgets what has waited longer than `ttl` seconds."""
+    cutoff = time.monotonic() - ttl
+    for key in [k for k, entry in pending.items() if entry["created"] < cutoff]:
+        del pending[key]
+
+
 class Links:
     """Short links that are waiting to be opened on a projector. They live in memory only.
 
@@ -167,9 +178,7 @@ class Links:
         self.pending: Dict[str, PendingLink] = {}  # id → entry
 
     def purge(self) -> None:
-        cutoff = time.monotonic() - LINK_TTL
-        for link_id in [i for i, entry in self.pending.items() if entry["created"] < cutoff]:
-            del self.pending[link_id]
+        drop_older(self.pending, LINK_TTL)
 
     def full(self) -> bool:
         self.purge()
@@ -198,6 +207,7 @@ class Links:
 
     def cancel(self, link_id: str, username: Optional[str]) -> bool:
         """Drops a link that was not opened. With a username, only that user's own."""
+        self.purge()
         entry = self.pending.get(link_id)
         if entry is None or (username is not None and entry["created_by"] != username):
             return False

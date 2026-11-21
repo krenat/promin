@@ -26,6 +26,11 @@ function show(link) {
   timer = setInterval(tick, 1000);
 }
 
+// The server says so when a link was opened on a projector: it is spent.
+export function linkUsed(id) {
+  if (current && current.id === id) show(null);
+}
+
 function tick() {
   var seconds = Math.round((current.until - Date.now()) / 1000);
   if (seconds <= 0) { show(null); return; }

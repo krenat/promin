@@ -126,9 +126,11 @@ The same page has a "check the projector" button that shows which of these setti
 
 Typing `http://<address>:<port>/tv` with a TV remote is slow, and scanning a QR code needs the phone in front of the screen. With `PROMIN_SHORTENER=isgd` the phone page offers a third way: tap the projector indicator, then the short link button, and type the address it shows (such as `is.gd/k7x2mq`) on the projector.
 
-- The link is valid for 10 minutes and works once. The screen that opens it becomes a paired projector, approved by whoever made the link, exactly as after a QR code; it appears in the list on the `/users` page and is disconnected there.
+- The link is valid for 10 minutes and works once. The screen that opens it and presses the start button becomes a paired projector, approved by whoever made the link, exactly as after a QR code; it appears in the list on the `/users` page and is disconnected there. The phone stops showing a link once it is used.
+- The press is what spends the link, so a program that only fetches the address (a link previewer, the shortener's own checks) cannot use it up. A browser that is logged in already, such as your own phone, stays logged in and leaves the link unspent.
 - After that first use the link opens nothing: the address left in the projector's history shows only a QR code, whether the projector was disconnected or not.
-- A link that was not opened can be cancelled on the phone by its maker, or by an administrator.
+- A link that was not opened can be cancelled on the phone by its maker, or by an administrator. At most 30 links are made in an hour, by everyone together.
+- Make the link from the phone page opened at the address the projector can reach too: none is made for `localhost`.
 - To make the short address the service sends its own address with the one-time token to is.gd, which needs no account. is.gd cannot delete a link, so nothing depends on that: the token on this server is what ends it. Whoever guesses the six characters of a link within its 10 minutes becomes a projector instead of yours, which then shows a QR code; a projector can only show videos, and it is in the list.
 
 ### Watch queue

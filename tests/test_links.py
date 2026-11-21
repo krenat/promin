@@ -1,15 +1,16 @@
 """Connecting a projector by a short link typed on it."""
 from __future__ import annotations
 
+import http.client
 import io
 import json
-import time
 import urllib.error
 
 import pytest
 
 from helpers import another, make_client, remote_closes
 from promin import shortener
+from promin.devices import LINK_TTL
 from promin.shortener import ALIAS_ALPHABET, IsGd, ShortenerError
 
 
@@ -50,6 +51,9 @@ def test_a_short_link_makes_the_screen_a_projector(client, projector, links):
     # Opening the address spends nothing: a link previewer may fetch it before the projector.
     page = projector.get("/c/" + token)
     assert page.status_code == 200 and "tv.js" in page.text
+    # The address with the token does not travel to the sites the page loads its fonts from.
+    assert page.headers["referrer-policy"] == "no-referrer"
+    assert '<meta name="referrer" content="no-referrer">' in page.text
     assert projector.get("/api/me").status_code == 401
 
     r = projector.post("/api/links/redeem", json={"token": token})
@@ -73,13 +77,12 @@ def test_a_link_works_only_once(client, projector, links):
     assert len(client.get("/api/devices").json()["devices"]) == 1
 
 
-def test_unknown_and_expired_links_are_refused(client, projector, links, monkeypatch):
+def test_unknown_and_expired_links_are_refused(client, projector, links):
     assert projector.post("/api/links/redeem", json={"token": "x" * 32}).status_code == 404
     assert projector.post("/api/links/redeem", json={"token": ""}).status_code == 404
     assert projector.post("/api/links/redeem", json={}).status_code == 422
-    client.post("/api/links")
-    now = time.monotonic()
-    monkeypatch.setattr("promin.devices.time.monotonic", lambda: now + 601)
+    link_id = client.post("/api/links").json()["id"]
+    client.app.state.services.links.pending[link_id]["created"] -= LINK_TTL + 1
     assert projector.post("/api/links/redeem", json={"token": token_of(links)}).status_code == 404
     assert client.get("/api/devices").json()["devices"] == []
 
@@ -141,11 +144,50 @@ def test_waiting_links_are_limited(client, links):
     assert len(links.asked) == 20
 
 
+def test_a_browser_that_is_logged_in_keeps_its_login(client, viewer, projector, links):
+    """Someone opens the link on their own phone: it must not turn into a projector."""
+    client.post("/api/links")
+    token = token_of(links)
+    r = viewer.post("/api/links/redeem", json={"token": token})
+    assert r.status_code == 409 and "set-cookie" not in r.headers
+    assert viewer.get("/api/me").json()["role"] == "viewer"
+    # The link was not spent on it, and a projector does not take a second link either.
+    assert projector.post("/api/links/redeem", json={"token": token}).status_code == 200
+    client.post("/api/links")
+    assert projector.post("/api/links/redeem", json={"token": token_of(links)}).status_code == 409
+    assert len(client.get("/api/devices").json()["devices"]) == 1
+
+
+def test_the_phone_is_told_when_its_link_is_opened(client, projector, links):
+    with client.websocket_connect("/ws?role=remote") as remote:
+        link_id = client.post("/api/links").json()["id"]
+        projector.post("/api/links/redeem", json={"token": token_of(links)})
+        assert remote.receive_json() == {"type": "tv", "connected": False}
+        assert remote.receive_json() == {"type": "link", "id": link_id}
+
+
+def test_new_links_are_limited_even_when_each_is_cancelled(client, links):
+    for _ in range(30):
+        r = client.post("/api/links")
+        assert r.status_code == 201
+        assert client.delete("/api/links/" + r.json()["id"]).status_code == 204
+    assert client.post("/api/links").status_code == 429
+    assert len(links.asked) == 30
+
+
+@pytest.mark.parametrize("host", ["localhost:8080", "127.0.0.1:8080", "[::1]:8080"])
+def test_no_link_is_made_for_an_address_only_this_machine_knows(client, links, host):
+    r = client.post("/api/links", headers={"Host": host})
+    assert r.status_code == 400 and "localhost" in r.json()["detail"]
+    assert links.asked == []
+
+
 def test_the_shortener_is_chosen_by_the_settings(tmp_path):
     assert shortener.create("") is None
     assert isinstance(shortener.create("isgd"), IsGd)
-    with pytest.raises(RuntimeError):
-        make_client(tmp_path, login=False, shortener="nope")
+    # A wrong name switches links off; it does not stop the service.
+    with make_client(tmp_path, shortener="nope") as c:
+        assert c.get("/api/me").json()["links"] is False
 
 
 def answers(monkeypatch, *replies):
@@ -186,7 +228,12 @@ def test_isgd_errors_are_reported_not_retried(monkeypatch):
     refused = urllib.error.HTTPError(
         "u", 400, "Bad", None, io.BytesIO(b'{"errorcode": 1, "errormessage": "bad url"}')  # type: ignore[arg-type]
     )
-    for reply in ({"errorcode": 3, "errormessage": "rate limit"}, refused, OSError("no network"), b"<html>"):
+    unreadable = urllib.error.HTTPError("u", 502, "Bad", None, None)  # type: ignore[arg-type]
+    cut_short = http.client.IncompleteRead(b"{")
+    for reply in (
+        {"errorcode": 3, "errormessage": "rate limit"}, refused, unreadable, cut_short,
+        OSError("no network"), b"<html>", b"[]",
+    ):
         asked = answers(monkeypatch, reply)
         with pytest.raises(ShortenerError):
             IsGd().shorten("http://a/c/t")

@@ -1,7 +1,9 @@
 """Short addresses for connecting a projector, made by a public URL shortener."""
 from __future__ import annotations
 
+import http.client
 import json
+import logging
 import secrets
 import urllib.error
 import urllib.parse
@@ -14,6 +16,8 @@ ALIAS_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 ALIAS_LENGTH = 6
 ATTEMPTS = 3
 TIMEOUT = 5.0
+
+log = logging.getLogger(__name__)
 
 
 class ShortenerError(Exception):
@@ -54,9 +58,15 @@ class IsGd:
                 body = r.read(4096)
         except urllib.error.HTTPError as exc:
             # An error may come with an HTTP error status and the explanation in the body.
-            body = exc.read(4096)
-        except OSError as exc:
-            raise ShortenerError(str(exc)) from exc
+            try:
+                body = exc.read(4096)
+            except Exception:
+                # An error without a body fails to be read in a way that depends on the
+                # Python version; whatever it is, there is no answer.
+                raise ShortenerError("HTTP %d" % exc.code) from exc
+        except (OSError, http.client.HTTPException) as exc:
+            # No network, a timeout, or an answer cut short.
+            raise ShortenerError(repr(exc)) from exc
         try:
             answer = json.loads(body)
         except ValueError as exc:
@@ -70,11 +80,13 @@ SHORTENERS = {"isgd": IsGd}
 
 
 def create(name: str) -> Optional[Shortener]:
-    """The shortener the settings name, or None when links are switched off."""
+    """The shortener the settings name, or None when links are switched off. A name that
+    is not known switches them off too: a wrong value must not stop the service."""
     if not name:
         return None
     if name not in SHORTENERS:
-        raise RuntimeError(
-            "PROMIN_SHORTENER: unknown %r, expected one of: %s" % (name, ", ".join(SHORTENERS))
+        log.warning(
+            "Ignoring PROMIN_SHORTENER=%r: expected one of: %s", name, ", ".join(SHORTENERS)
         )
+        return None
     return SHORTENERS[name]()
